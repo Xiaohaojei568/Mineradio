@@ -3637,6 +3637,7 @@ var updatePreviewState = {
   message: '',
   restartRequired: false,
   patchFallbackTried: false,
+  breathing: false,
   hero: '当前版本，更新检测已就绪。',
   notes: [
     '安装包文字对比修复',
@@ -4491,6 +4492,10 @@ function updateDesktopRuntimeState(state) {
   applyRendererPowerMode();
   if (fx && (fx.desktopLyrics || fx.wallpaperMode)) setTimeout(syncDesktopOverlayState, 0);
   if (wasDeep && !isDeepBackgroundMode()) recoverVisualsAfterBackground('desktop-runtime-state');
+  if (typeof clearBubbleDanmakuTimers === 'function' && typeof scheduleBubbleDanmakuResume === 'function' && typeof bubbleDanmakuEnabled === 'function' && bubbleDanmakuEnabled()) {
+    if (isDeepBackgroundMode()) clearBubbleDanmakuTimers();
+    else scheduleBubbleDanmakuResume(1000);
+  }
   if (desktopRuntimeState.fullscreen !== wasFullscreen) scheduleMainRendererViewportRefresh('desktop-runtime-state');
 }
 function installRenderPowerHooks() {
@@ -4500,6 +4505,10 @@ function installRenderPowerHooks() {
     updateRenderPowerClasses();
     applyRendererPowerMode();
     if (wasDeep && !isDeepBackgroundMode()) recoverVisualsAfterBackground('visibilitychange');
+    if (typeof clearBubbleDanmakuTimers === 'function' && typeof scheduleBubbleDanmakuResume === 'function' && typeof bubbleDanmakuEnabled === 'function' && bubbleDanmakuEnabled()) {
+      if (document.hidden || isDeepBackgroundMode()) clearBubbleDanmakuTimers();
+      else scheduleBubbleDanmakuResume(1000);
+    }
   });
   window.addEventListener('focus', function(){
     var wasDeep = document.body.classList.contains('render-deep-sleep');
@@ -18582,7 +18591,7 @@ function scheduleBubbleDanmakuResume(delay) {
   if (bubbleDanmakuState.resumeTimer) clearTimeout(bubbleDanmakuState.resumeTimer);
   bubbleDanmakuState.resumeTimer = setTimeout(function(){
     bubbleDanmakuState.resumeTimer = 0;
-    if (bubbleDanmakuEnabled() && bubbleDanmakuInVisualPage()) applyBubbleDanmakuState(false);
+    if (!document.hidden && !isDeepBackgroundMode() && bubbleDanmakuEnabled() && bubbleDanmakuInVisualPage()) applyBubbleDanmakuState(false);
   }, Math.max(120, Number(delay) || 760));
 }
 function clearBubbleDanmakuLayer() {
@@ -18649,6 +18658,10 @@ async function fetchBubbleDanmakuComments(song) {
   return shuffleBubbleComments(comments);
 }
 function scheduleBubbleDanmakuLoop() {
+  if (document.hidden || isDeepBackgroundMode()) {
+    scheduleBubbleDanmakuResume(900);
+    return;
+  }
   if (bubbleDanmakuState.spawnTimer) clearInterval(bubbleDanmakuState.spawnTimer);
   bubbleDanmakuState.spawnTimer = setInterval(spawnBubbleDanmaku, 2600);
   setTimeout(spawnBubbleDanmaku, 360);
@@ -18692,6 +18705,11 @@ function applyBubbleDanmakuState(force) {
   document.body.classList.toggle('bubble-danmaku-on', enabled && inVisualPage);
   var layer = document.getElementById('bubble-danmaku-layer');
   if (layer) layer.setAttribute('aria-hidden', enabled && inVisualPage ? 'false' : 'true');
+  if (enabled && (document.hidden || isDeepBackgroundMode())) {
+    clearBubbleDanmakuTimers();
+    scheduleBubbleDanmakuResume(1100);
+    return;
+  }
   if (!enabled) {
     if (bubbleDanmakuState.resumeTimer) {
       clearTimeout(bubbleDanmakuState.resumeTimer);
@@ -18716,12 +18734,17 @@ function applyBubbleDanmakuState(force) {
 }
 function spawnBubbleDanmaku() {
   if (!bubbleDanmakuEnabled()) return;
+  if (document.hidden || isDeepBackgroundMode()) {
+    clearBubbleDanmakuTimers();
+    scheduleBubbleDanmakuResume(1100);
+    return;
+  }
   if (!bubbleDanmakuInVisualPage()) {
     stopBubbleDanmaku(true);
     document.body.classList.remove('bubble-danmaku-on');
     return;
   }
-  if (document.hidden || !playing || !bubbleDanmakuState.comments.length) return;
+  if (!playing || !bubbleDanmakuState.comments.length) return;
   var layer = document.getElementById('bubble-danmaku-layer');
   if (!layer) return;
   if (layer.querySelectorAll('.bubble-danmaku-shell').length >= 8) return;
@@ -25580,7 +25603,6 @@ function initUpdatePreview() {
   renderUpdatePreviewPanel();
   setUpdatePreviewVisible(true);
   checkLatestUpdate();
-  setTimeout(startUpdateIconBreathing, 760);
 }
 
 function setUpdatePreviewVisible(visible) {
@@ -25588,9 +25610,8 @@ function setUpdatePreviewVisible(visible) {
   var entry = document.getElementById('update-entry');
   if (!entry) return;
   entry.classList.toggle('available', updatePreviewState.visible);
-  if (!updatePreviewState.visible && window.gsap) {
-    window.gsap.killTweensOf(entry);
-    window.gsap.set(entry, { autoAlpha: 0, y: 0, clearProps: 'boxShadow,filter,scale' });
+  if (!updatePreviewState.visible) {
+    stopUpdateIconBreathing();
     return;
   }
   if (updatePreviewState.visible && window.gsap) {
@@ -25599,6 +25620,7 @@ function setUpdatePreviewVisible(visible) {
       { autoAlpha: 1, y: 0, scale: 1, filter: 'blur(0px)', duration: 0.62, delay: 0.18, ease: 'expo.out', overwrite: true }
     );
   }
+  setTimeout(startUpdateIconBreathing, 760);
 }
 
 async function checkLatestUpdate() {
@@ -25638,6 +25660,9 @@ function applyLatestUpdateInfo(data) {
 function startUpdateIconBreathing() {
   var entry = document.getElementById('update-entry');
   if (!entry || !window.gsap) return;
+  if (!updatePreviewState.visible || !entry.classList.contains('available')) return;
+  if (updatePreviewState.breathing) return;
+  updatePreviewState.breathing = true;
   var ring = entry.querySelector('.update-ring');
   window.gsap.killTweensOf(entry, 'y,boxShadow');
   window.gsap.set(entry, { autoAlpha: 1 });
@@ -25660,6 +25685,16 @@ function startUpdateIconBreathing() {
       transformOrigin: '50% 50%'
     });
   }
+}
+function stopUpdateIconBreathing() {
+  var entry = document.getElementById('update-entry');
+  updatePreviewState.breathing = false;
+  if (!entry || !window.gsap) return;
+  var ring = entry.querySelector('.update-ring');
+  window.gsap.killTweensOf(entry);
+  if (ring) window.gsap.killTweensOf(ring);
+  window.gsap.set(entry, { autoAlpha: 0, y: 0, scale: 1, rotate: 0, clearProps: 'boxShadow,filter' });
+  if (ring) window.gsap.set(ring, { rotate: 0 });
 }
 
 function renderUpdatePreviewPanel() {
@@ -29446,9 +29481,6 @@ function syncDesktopOverlayState() {
   if (fx.desktopLyrics) pushDesktopLyricsState(false);
   if (fx.wallpaperMode) pushWallpaperState(false);
 }
-setInterval(function(){
-  if (fx && (fx.desktopLyrics || fx.wallpaperMode)) syncDesktopOverlayState();
-}, 320);
 
 // 全屏
 var desktopFullscreenActive = false;
