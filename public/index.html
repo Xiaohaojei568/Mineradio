@@ -4236,6 +4236,7 @@ var desktopRuntimeState = {
   fullscreen: false
 };
 var renderPowerState = { mode: '', width: 0, height: 0, pixelRatio: 0 };
+var visualRecoverState = { lastAt: 0 };
 var backgroundCacheTrimTimer = 0;
 var runtimePerfState = {
   lastCacheTrimAt: 0,
@@ -4495,15 +4496,17 @@ function updateDesktopRuntimeState(state) {
 function installRenderPowerHooks() {
   updateRenderPowerClasses();
   document.addEventListener('visibilitychange', function(){
+    var wasDeep = document.body.classList.contains('render-deep-sleep');
     updateRenderPowerClasses();
     applyRendererPowerMode();
-    if (!isDeepBackgroundMode()) recoverVisualsAfterBackground('visibilitychange');
+    if (wasDeep && !isDeepBackgroundMode()) recoverVisualsAfterBackground('visibilitychange');
   });
   window.addEventListener('focus', function(){
+    var wasDeep = document.body.classList.contains('render-deep-sleep');
     desktopRuntimeState.focused = true;
     updateRenderPowerClasses();
     applyRendererPowerMode();
-    if (!isDeepBackgroundMode()) recoverVisualsAfterBackground('focus');
+    if (wasDeep && !isDeepBackgroundMode()) recoverVisualsAfterBackground('focus');
   });
   window.addEventListener('blur', function(){
     desktopRuntimeState.focused = false;
@@ -10634,6 +10637,9 @@ function forceLoadingSettled(reason) {
   if (reason && window.__mineradioDebugLoading) console.log('[LoadingSettled]', reason);
 }
 function recoverVisualsAfterBackground(reason) {
+  var now = performance.now ? performance.now() : Date.now();
+  if (visualRecoverState.lastAt && now - visualRecoverState.lastAt < 180) return;
+  visualRecoverState.lastAt = now;
   applyRendererPowerMode();
   if (typeof scheduleMainRendererViewportRefresh === 'function') scheduleMainRendererViewportRefresh(reason || 'restore');
   if (audio && audio.src && !audio.paused && ((uniforms.uLoading.value || 0) > 0.015 || loadingTween || loadingHideTimer)) {
@@ -28197,6 +28203,8 @@ function hideGestureCursor(){}  // stub: 兼容旧调用
 // ============================================================
 //  Resize / 快捷键
 // ============================================================
+var mainRendererViewportRefreshTimers = [];
+var mainRendererViewportLastImmediateAt = 0;
 function refreshMainRendererViewport(reason) {
   if (typeof camera !== 'undefined' && camera) {
     camera.aspect = Math.max(1, innerWidth) / Math.max(1, innerHeight);
@@ -28208,9 +28216,26 @@ function refreshMainRendererViewport(reason) {
   }
 }
 function scheduleMainRendererViewportRefresh(reason) {
-  refreshMainRendererViewport(reason || 'sync');
-  [48, 140, 320].forEach(function(delay){
-    setTimeout(function(){ refreshMainRendererViewport(reason || 'sync'); }, delay);
+  reason = reason || 'sync';
+  var now = performance.now ? performance.now() : Date.now();
+  var runImmediate = now - mainRendererViewportLastImmediateAt > 32;
+  if (runImmediate) {
+    mainRendererViewportLastImmediateAt = now;
+    refreshMainRendererViewport(reason);
+  }
+  if (mainRendererViewportRefreshTimers.length) {
+    mainRendererViewportRefreshTimers.forEach(function(timer){ clearTimeout(timer); });
+    mainRendererViewportRefreshTimers = [];
+  }
+  var delays = runImmediate ? [72, 180, 340] : [32, 120, 280];
+  var pending = delays.length;
+  delays.forEach(function(delay){
+    var timer = setTimeout(function(){
+      refreshMainRendererViewport(reason);
+      pending--;
+      if (pending <= 0) mainRendererViewportRefreshTimers = [];
+    }, delay);
+    mainRendererViewportRefreshTimers.push(timer);
   });
 }
 window.addEventListener('resize', function(){

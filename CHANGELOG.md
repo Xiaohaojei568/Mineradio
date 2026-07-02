@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.2
+
+- 优化桌面版从后台、最小化或隐藏状态重新进入应用时的流畅度，减少 WebGL 画布恢复和窗口状态同步造成的瞬时卡顿。
+- 合并重复的渲染视口刷新，避免切回窗口、恢复显示和全屏状态同步在同一瞬间连续触发重型恢复。
+- Electron 主窗口状态通知增加去重，降低前端重复处理同一窗口状态的概率。
+
 ## v1.1.1
 
 - P0 installer safety fix: installation now defaults to the first available non-C drive from `D:\Mineradio` through `Z:\Mineradio`; it falls back to `C:\Mineradio` only when no D-Z drive exists.

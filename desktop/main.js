@@ -22,6 +22,7 @@ let wallpaperState = {};
 let htmlFullscreenActive = false;
 let windowFullscreenActive = false;
 let mainWindowStateTimer = null;
+let mainWindowStateSignature = '';
 const registeredGlobalHotkeys = new Map();
 
 const WINDOWED_ASPECT = 16 / 9;
@@ -155,9 +156,13 @@ function configureAppPermissions() {
   }
 }
 
-function sendWindowState(win) {
+function sendWindowState(win, force = false) {
   if (!win || win.isDestroyed()) return;
-  win.webContents.send('desktop-window-state', getWindowState(win));
+  const state = getWindowState(win);
+  const signature = JSON.stringify(state);
+  if (!force && signature === mainWindowStateSignature) return;
+  mainWindowStateSignature = signature;
+  win.webContents.send('desktop-window-state', state);
 }
 
 function sendGlobalHotkeyAction(action) {
@@ -1405,7 +1410,7 @@ async function createWindow() {
   });
 
   mainWindow.webContents.once('did-finish-load', () => {
-    sendWindowState(mainWindow);
+    sendWindowState(mainWindow, true);
   });
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -1417,7 +1422,7 @@ async function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    sendWindowState(mainWindow);
+    sendWindowState(mainWindow, true);
   });
 
   mainWindow.on('maximize', () => sendWindowState(mainWindow));
@@ -1437,6 +1442,7 @@ async function createWindow() {
     }
     closeOverlayWindows();
     mainWindow = null;
+    mainWindowStateSignature = '';
   });
   mainWindow.on('enter-full-screen', () => {
     windowFullscreenActive = true;
