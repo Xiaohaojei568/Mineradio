@@ -2330,15 +2330,37 @@ const SODA_LOGIN_INFO_CACHE_MS = 8000;
 const SODA_CLIENT_SCAN_CACHE_FILE = process.env.SODA_CLIENT_SCAN_CACHE_FILE || path.join(mineradioUserDataDir(), 'soda-client-dir.json');
 const SODA_CLIENT_SCAN_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 const SODA_CLIENT_NEGATIVE_SCAN_CACHE_MS = 60 * 1000;
-const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(5000, Math.min(180000, Number(process.env.SODA_CLIENT_GLOBAL_SCAN_MS) || 60000));
+const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(3000, Math.min(30000, Number(process.env.SODA_CLIENT_GLOBAL_SCAN_MS) || 12000));
+const SODA_USER_DATA_SCAN_CACHE_MS = 60 * 1000;
+const SODA_USER_DATA_SCAN_MAX_FILES = 180;
+const SODA_USER_DATA_SCAN_MAX_MS = Math.max(1000, Math.min(12000, Number(process.env.SODA_USER_DATA_SCAN_MAX_MS) || 4500));
 let sodaAutoSyncEnabled = true;
 let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
 let sodaLoginInfoCache = null;
 let sodaLoginInfoCacheAt = 0;
-let sodaLastLocalSync = { checkedAt: 0, userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
+let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
 let sodaOfficialClientDirCache = null;
+let sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
 const sodaPlaybackSessions = new Map();
+
+function clearSodaRuntimeCaches(opts) {
+  opts = opts || {};
+  sodaLoginInfoCache = null;
+  sodaLoginInfoCacheAt = 0;
+  sodaDeviceInfoCache = null;
+  sodaNativeSecurity = null;
+  sodaOfficialClientDirCache = null;
+  sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
+  sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
+  try { if (typeof sodaChromiumKeyCache !== 'undefined') sodaChromiumKeyCache.clear(); } catch (e) {}
+  try { if (typeof sodaDpapiCache !== 'undefined') sodaDpapiCache.clear(); } catch (e) {}
+  if (opts.removeStateFiles) {
+    for (const file of [SODA_CLIENT_SCAN_CACHE_FILE, SODA_COOKIE_FILE]) {
+      try { if (pathExistsFile(file)) fs.unlinkSync(file); } catch (e) {}
+    }
+  }
+}
 
 function uniqueExistingOrder(items) {
   const out = [];
@@ -2378,22 +2400,32 @@ function installRootFromPathHint(value) {
   return ext === '.exe' || ext === '.lnk' ? path.dirname(normalized) : normalized;
 }
 
-function sodaUserDataNameCandidates() {
-  return ['SodaMusic', 'Soda Music', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
-}
-
-function sodaKnownUserDataDirs() {
+function sodaExplicitUserDataDirs() {
   const dirs = [];
   function pushDir(dir) {
     if (dir) dirs.push(dir);
   }
   pushDir(process.env.SODA_USER_DATA_DIR);
+  return uniqueExistingOrder(dirs);
+}
+
+// Fast-path Electron user-data folder names under APPDATA/LOCALAPPDATA.
+// This is not an install-dir whitelist; arbitrary install paths are handled separately.
+function sodaCommonUserDataFolderNames() {
+  return ['SodaMusic', 'Soda Music', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
+}
+
+function sodaDefaultUserDataDirs() {
+  const dirs = [];
+  function pushDir(dir) {
+    if (dir) dirs.push(dir);
+  }
   for (const root of [process.env.APPDATA, process.env.LOCALAPPDATA]) {
     if (!root) continue;
-    for (const name of sodaUserDataNameCandidates()) pushDir(path.join(root, name));
+    for (const name of sodaCommonUserDataFolderNames()) pushDir(path.join(root, name));
   }
   if (process.env.USERPROFILE) {
-    for (const name of sodaUserDataNameCandidates()) {
+    for (const name of sodaCommonUserDataFolderNames()) {
       pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', name));
       pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Local', name));
     }
@@ -2401,8 +2433,24 @@ function sodaKnownUserDataDirs() {
   return uniqueExistingOrder(dirs);
 }
 
+function sodaStaticUserDataDirs() {
+  return uniqueExistingOrder(sodaExplicitUserDataDirs().concat(sodaDefaultUserDataDirs()));
+}
+
+function sodaKnownUserDataDirs(opts) {
+  opts = opts || {};
+  const dirs = sodaStaticUserDataDirs();
+  if (opts.discover) dirs.push(...sodaDiscoveredUserDataDirs());
+  return uniqueExistingOrder(dirs);
+}
+
 function sodaUserDataDir() {
   const dirs = sodaKnownUserDataDirs();
+  const withDevice = dirs.find(dir => {
+    try { return dir && pathExistsFile(path.join(dir, 'DeviceV1')); }
+    catch (e) { return false; }
+  });
+  if (withDevice) return withDevice;
   return dirs.find(dir => {
     try { return dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory(); }
     catch (e) { return false; }
@@ -2461,7 +2509,7 @@ function readSodaRegistryInstallRoots() {
 function readRunningSodaProcessRoots() {
   if (process.platform !== 'win32') return [];
   try {
-    const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process | Where-Object { $_.ProcessName -match 'soda|luna|qishui' } | ForEach-Object { $_.Path }";
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process | Where-Object { $_.ProcessName -match 'soda|luna|qishui|\u6c7d\u6c34' -or $_.Path -match 'soda|luna|qishui|\u6c7d\u6c34' } | ForEach-Object { $_.Path }";
     const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       timeout: 2500,
@@ -2577,7 +2625,7 @@ function windowsFixedDriveRoots() {
   if (process.platform !== 'win32') return [];
   let roots = [];
   try {
-    const script = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_LogicalDisk -Filter \"DriveType=3\" | ForEach-Object { $_.DeviceID + '\\' }";
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 -or $_.DriveType -eq 2 } | ForEach-Object { $_.DeviceID + '\\' }";
     const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       timeout: 4000,
@@ -2633,61 +2681,62 @@ function findSodaClientDirsByGlobalScan() {
     if (!isSodaNativeModuleDir(nativeDir)) return;
     pushCandidate(sodaClientDirFromNativeModuleDir(nativeDir));
   }
-  for (const root of roots) {
-    if (Date.now() > deadline || candidates.length) break;
-    const queuedDirs = new Set();
-    const urgentQueue = [];
-    const normalQueue = [];
-    let urgentCursor = 0;
-    let normalCursor = 0;
-    function enqueue(dir, urgent) {
-      const key = path.resolve(dir).toLowerCase();
-      if (queuedDirs.has(key)) return;
-      queuedDirs.add(key);
-      (urgent ? urgentQueue : normalQueue).push(dir);
+  const queuedDirs = new Set();
+  const urgentQueue = [];
+  const normalQueue = [];
+  let urgentCursor = 0;
+  let normalCursor = 0;
+  function enqueue(dir, urgent) {
+    if (!dir) return;
+    let key = '';
+    try { key = path.resolve(dir).toLowerCase(); }
+    catch (e) { return; }
+    if (queuedDirs.has(key)) return;
+    queuedDirs.add(key);
+    (urgent ? urgentQueue : normalQueue).push(dir);
+  }
+  roots.forEach(root => enqueue(root, false));
+  while ((urgentCursor < urgentQueue.length || normalCursor < normalQueue.length) && Date.now() <= deadline && !candidates.length) {
+    const dir = urgentCursor < urgentQueue.length ? urgentQueue[urgentCursor++] : normalQueue[normalCursor++];
+    if (!dir) continue;
+    pushCandidate(dir);
+    pushNativeModuleCandidate(dir);
+    if (candidates.length) break;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (e) { continue; }
+    const dirs = [];
+    let hasBdticket = false;
+    let hasBdms = false;
+    for (const entry of entries) {
+      const lower = entry.name.toLowerCase();
+      if (entry.isFile()) {
+        if (lower === 'bdticket.node') hasBdticket = true;
+        else if (lower === 'bdms.node') hasBdms = true;
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+      if (shouldSkipSodaGlobalScanDir(path.join(dir, entry.name), entry.name)) continue;
+      dirs.push(entry.name);
     }
-    enqueue(root, false);
-    while ((urgentCursor < urgentQueue.length || normalCursor < normalQueue.length) && Date.now() <= deadline && !candidates.length) {
-      const dir = urgentCursor < urgentQueue.length ? urgentQueue[urgentCursor++] : normalQueue[normalCursor++];
-      if (!dir) continue;
-      pushCandidate(dir);
-      pushNativeModuleCandidate(dir);
+    if (hasBdticket && hasBdms) pushNativeModuleCandidate(dir);
+    if (candidates.length) break;
+    dirs.sort((a, b) => sodaScanPriority(a) - sodaScanPriority(b) || a.localeCompare(b));
+    for (const name of dirs) {
+      const child = path.join(dir, name);
+      const lower = name.toLowerCase();
+      if (lower === 'resources') pushCandidate(dir);
+      else if (lower === 'app.asar.unpacked') pushNativeModuleCandidate(child);
       if (candidates.length) break;
-      let entries = [];
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-      catch (e) { continue; }
-      const dirs = [];
-      let hasBdticket = false;
-      let hasBdms = false;
-      for (const entry of entries) {
-        const lower = entry.name.toLowerCase();
-        if (entry.isFile()) {
-          if (lower === 'bdticket.node') hasBdticket = true;
-          else if (lower === 'bdms.node') hasBdms = true;
-          continue;
-        }
-        if (!entry.isDirectory()) continue;
-        if (shouldSkipSodaGlobalScanDir(path.join(dir, entry.name), entry.name)) continue;
-        dirs.push(entry.name);
-      }
-      if (hasBdticket && hasBdms) pushNativeModuleCandidate(dir);
-      if (candidates.length) break;
-      dirs.sort((a, b) => sodaScanPriority(a) - sodaScanPriority(b) || a.localeCompare(b));
-      for (const name of dirs) {
-        const child = path.join(dir, name);
-        const lower = name.toLowerCase();
-        if (lower === 'resources') pushCandidate(dir);
-        else if (lower === 'app.asar.unpacked') pushNativeModuleCandidate(child);
-        if (candidates.length) break;
-        enqueue(child, sodaScanPriority(name) <= 1);
-      }
+      enqueue(child, sodaScanPriority(name) <= 1);
     }
   }
   candidates.sort((a, b) => compareVersionText(path.basename(b), path.basename(a)));
   return candidates;
 }
 
-function resolveSodaOfficialClientDir() {
+function resolveSodaOfficialClientDir(opts) {
+  opts = opts || {};
   const explicitNode = process.env.SODA_BDTICKET_NODE || process.env.SODA_BDMS_NODE;
   if (explicitNode) {
     const versionDir = sodaClientDirFromNativeNodePath(explicitNode);
@@ -2715,7 +2764,7 @@ function resolveSodaOfficialClientDir() {
       }
     } catch (e) {}
   }
-  if (!candidates.length) {
+  if (!candidates.length && opts.allowGlobalScan !== false) {
     findSodaClientDirsByGlobalScan().forEach(dir => candidates.push(dir));
   }
   candidates.sort((a, b) => compareVersionText(path.basename(b), path.basename(a)));
@@ -2735,8 +2784,9 @@ function readSodaBuildId(versionDir) {
   }
 }
 
-function sodaUserAgent() {
-  const versionDir = sodaNativeSecurity && sodaNativeSecurity.clientDir || resolveSodaOfficialClientDir();
+function sodaUserAgent(opts) {
+  opts = opts || {};
+  const versionDir = sodaNativeSecurity && sodaNativeSecurity.clientDir || (opts.noClientScan ? '' : resolveSodaOfficialClientDir());
   const buildId = process.env.SODA_BUILD_ID || readSodaBuildId(versionDir);
   return `LunaPC/${SODA_APP_VERSION}(${buildId || SODA_DEFAULT_BUILD_ID})`;
 }
@@ -2875,6 +2925,11 @@ function sodaCookieObject() {
   return parseCookieString(sodaCookie);
 }
 
+function sodaCookieHasLoginTicket(obj) {
+  obj = obj || sodaCookieObject();
+  return !!(obj.sessionid || obj.sessionid_ss || obj.sid_tt || obj.uid_tt || obj.uid_tt_ss || obj.sid_guard);
+}
+
 function pathExistsFile(file) {
   try { return !!file && fs.existsSync(file) && fs.statSync(file).isFile(); }
   catch (e) { return false; }
@@ -2885,13 +2940,16 @@ function pathExistsDir(dir) {
   catch (e) { return false; }
 }
 
-function findFilesByName(root, fileName, maxDepth, maxResults, out) {
+function findFilesByName(root, fileName, maxDepth, maxResults, out, deadline) {
   out = out || [];
+  if (deadline && Date.now() > deadline) return out;
   if (!pathExistsDir(root) || maxDepth < 0 || out.length >= maxResults) return out;
   let entries = [];
   try { entries = fs.readdirSync(root, { withFileTypes: true }); }
   catch (e) { return out; }
+  entries.sort((a, b) => sodaUserDataPathScore(path.join(root, a.name)) - sodaUserDataPathScore(path.join(root, b.name)) || a.name.localeCompare(b.name));
   for (const entry of entries) {
+    if (deadline && Date.now() > deadline) break;
     if (out.length >= maxResults) break;
     const full = path.join(root, entry.name);
     if (entry.isFile() && entry.name === fileName) {
@@ -2899,13 +2957,139 @@ function findFilesByName(root, fileName, maxDepth, maxResults, out) {
       continue;
     }
     if (!entry.isDirectory() || maxDepth <= 0) continue;
-    if (/^(Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|blob_storage|Service Worker|Session Storage|TTNet|TTNetCache|logs?)$/i.test(entry.name)) continue;
-    findFilesByName(full, fileName, maxDepth - 1, maxResults, out);
+    if (/^(Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|blob_storage|Service Worker|Session Storage|TTNet|TTNetCache|logs?|Temp|Crashpad|Crash Reports)$/i.test(entry.name)) continue;
+    findFilesByName(full, fileName, maxDepth - 1, maxResults, out, deadline);
   }
   return out;
 }
 
-function sodaCookieDbCandidates() {
+function sodaUserDataScanRoots() {
+  const roots = [];
+  function pushRoot(root) {
+    if (root && pathExistsDir(root)) roots.push(root);
+  }
+  pushRoot(process.env.SODA_USER_DATA_ROOT);
+  for (const dir of sodaStaticUserDataDirs()) pushRoot(dir);
+  pushRoot(process.env.APPDATA);
+  pushRoot(process.env.LOCALAPPDATA);
+  if (process.env.USERPROFILE) {
+    pushRoot(path.join(process.env.USERPROFILE, 'AppData', 'Roaming'));
+    pushRoot(path.join(process.env.USERPROFILE, 'AppData', 'Local'));
+  }
+  const clientDir = sodaOfficialClientDirCache && sodaOfficialClientDirCache.clientDir || '';
+  if (clientDir) {
+    pushRoot(clientDir);
+    pushRoot(path.dirname(clientDir));
+    pushRoot(path.dirname(path.dirname(clientDir)));
+  }
+  return uniqueExistingOrder(roots);
+}
+
+function sodaUserDataPathScore(filePath) {
+  const lower = String(filePath || '').toLowerCase();
+  if (/soda|qishui|luna|qsyy|\u6c7d\u6c34/.test(lower)) return 0;
+  if (/bytedance|douyin|electron|appdata[\\/]local[\\/]programs/.test(lower)) return 1;
+  if (/chrome|edge|brave|vivaldi|firefox|browser/.test(lower)) return 6;
+  return 3;
+}
+
+function sodaUserDataDirFromCookieDb(dbPath) {
+  const dbDir = path.dirname(dbPath || '');
+  let cursor = dbDir;
+  for (let i = 0; cursor && i < 9; i++) {
+    if (pathExistsFile(path.join(cursor, 'DeviceV1')) || pathExistsFile(path.join(cursor, 'Local State')) || pathExistsDir(path.join(cursor, 'LunaCacheV2'))) {
+      return cursor;
+    }
+    const parent = path.dirname(cursor);
+    if (!parent || parent === cursor) break;
+    cursor = parent;
+  }
+  if (/^network$/i.test(path.basename(dbDir))) {
+    const profileDir = path.dirname(dbDir);
+    const profileName = path.basename(profileDir).toLowerCase();
+    if (/^(default|profile\s*\d+|persist|persist_|persist:)/i.test(profileName)) {
+      const parent = path.dirname(profileDir);
+      if (/^partitions$/i.test(path.basename(parent))) return path.dirname(parent);
+      return parent;
+    }
+    return profileDir;
+  }
+  return dbDir;
+}
+
+function sodaCookieDbHasSodaRows(dbPath) {
+  try {
+    return readSodaCookieRows(dbPath).length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+function scanSodaUserDataLocationsFresh() {
+  const deadline = Date.now() + SODA_USER_DATA_SCAN_MAX_MS;
+  const cookieDbs = [];
+  const dirs = [];
+  const seenCookieDbs = new Set();
+  const seenDirs = new Set();
+  function pushDir(dir) {
+    if (!dir || !pathExistsDir(dir)) return;
+    const key = path.resolve(dir).toLowerCase();
+    if (seenDirs.has(key)) return;
+    seenDirs.add(key);
+    dirs.push(dir);
+  }
+  function pushCookieDb(dbPath) {
+    if (!dbPath || !pathExistsFile(dbPath)) return;
+    const key = path.resolve(dbPath).toLowerCase();
+    if (seenCookieDbs.has(key)) return;
+    seenCookieDbs.add(key);
+    if (!sodaCookieDbHasSodaRows(dbPath)) return;
+    cookieDbs.push(dbPath);
+    pushDir(sodaUserDataDirFromCookieDb(dbPath));
+  }
+  for (const root of sodaUserDataScanRoots()) {
+    if (Date.now() > deadline) break;
+    for (const dbPath of findFilesByName(root, 'Cookies', 5, SODA_USER_DATA_SCAN_MAX_FILES, [], deadline)) pushCookieDb(dbPath);
+    if (Date.now() > deadline) break;
+    for (const deviceFile of findFilesByName(root, 'DeviceV1', 4, 48, [], deadline)) pushDir(path.dirname(deviceFile));
+  }
+  cookieDbs.sort((a, b) => {
+    try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; }
+    catch (e) { return 0; }
+  }).sort((a, b) => sodaUserDataPathScore(a) - sodaUserDataPathScore(b));
+  dirs.sort((a, b) => {
+    const ad = pathExistsFile(path.join(a, 'DeviceV1')) ? 0 : 1;
+    const bd = pathExistsFile(path.join(b, 'DeviceV1')) ? 0 : 1;
+    return ad - bd || sodaUserDataPathScore(a) - sodaUserDataPathScore(b);
+  });
+  return { dirs, cookieDbs };
+}
+
+function sodaUserDataDiscovery() {
+  const now = Date.now();
+  if (sodaUserDataDiscoveryCache.scannedAt && now - sodaUserDataDiscoveryCache.scannedAt < SODA_USER_DATA_SCAN_CACHE_MS) {
+    return sodaUserDataDiscoveryCache;
+  }
+  const fresh = scanSodaUserDataLocationsFresh();
+  sodaUserDataDiscoveryCache = {
+    scannedAt: now,
+    dirs: fresh.dirs || [],
+    cookieDbs: fresh.cookieDbs || [],
+  };
+  return sodaUserDataDiscoveryCache;
+}
+
+function sodaDiscoveredUserDataDirs() {
+  return sodaUserDataDiscovery().dirs || [];
+}
+
+function sodaDiscoveredCookieDbs() {
+  return sodaUserDataDiscovery().cookieDbs || [];
+}
+
+function sodaCookieDbCandidates(opts) {
+  opts = opts || {};
+  const includeDiscovery = !!opts.discover;
   const directRelatives = [
     ['Network', 'Cookies'],
     ['Default', 'Network', 'Cookies'],
@@ -2914,7 +3098,8 @@ function sodaCookieDbCandidates() {
     ['Partitions', 'persist:soda', 'Network', 'Cookies'],
   ];
   const candidates = [];
-  for (const dir of sodaKnownUserDataDirs()) {
+  if (includeDiscovery) sodaDiscoveredCookieDbs().forEach(dbPath => candidates.push(dbPath));
+  for (const dir of sodaKnownUserDataDirs({ discover: includeDiscovery })) {
     for (const rel of directRelatives) candidates.push(path.join(dir, ...rel));
     findFilesByName(dir, 'Cookies', 4, 16, candidates);
   }
@@ -2923,7 +3108,125 @@ function sodaCookieDbCandidates() {
     .sort((a, b) => {
       try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; }
       catch (e) { return 0; }
-    });
+    })
+    .sort((a, b) => sodaUserDataPathScore(a) - sodaUserDataPathScore(b));
+}
+
+const sodaChromiumKeyCache = new Map();
+const sodaDpapiCache = new Map();
+
+function bufferFromSqliteBlob(value) {
+  if (!value) return Buffer.alloc(0);
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (Array.isArray(value)) return Buffer.from(value);
+  return Buffer.alloc(0);
+}
+
+function bufferFromHex(value) {
+  const hex = String(value || '').trim();
+  if (!hex || !/^[0-9a-f]+$/i.test(hex) || hex.length % 2) return Buffer.alloc(0);
+  return Buffer.from(hex, 'hex');
+}
+
+function windowsDpapiUnprotect(input) {
+  const encrypted = bufferFromSqliteBlob(input);
+  if (process.platform !== 'win32' || !encrypted.length) return null;
+  const cacheKey = encrypted.toString('base64');
+  if (sodaDpapiCache.has(cacheKey)) return sodaDpapiCache.get(cacheKey);
+  try {
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "Add-Type -AssemblyName System.Security",
+      "$bytes=[Convert]::FromBase64String($args[0])",
+      "$plain=[Security.Cryptography.ProtectedData]::Unprotect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
+      "[Console]::Out.Write([Convert]::ToBase64String($plain))"
+    ].join('; ');
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script, cacheKey], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const plain = out ? Buffer.from(out, 'base64') : null;
+    if (plain && plain.length) sodaDpapiCache.set(cacheKey, plain);
+    return plain && plain.length ? plain : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function sodaLocalStateCandidatesForCookieDb(dbPath) {
+  const candidates = [];
+  let dir = path.dirname(dbPath || '');
+  for (let i = 0; dir && i < 8; i++) {
+    candidates.push(path.join(dir, 'Local State'));
+    const parent = path.dirname(dir);
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  for (const userDataDir of sodaKnownUserDataDirs()) candidates.push(path.join(userDataDir, 'Local State'));
+  return uniqueExistingOrder(candidates).filter(pathExistsFile);
+}
+
+function readChromiumOsCryptKey(localStatePath) {
+  if (!localStatePath) return null;
+  if (sodaChromiumKeyCache.has(localStatePath)) return sodaChromiumKeyCache.get(localStatePath);
+  try {
+    const data = JSON.parse(fs.readFileSync(localStatePath, 'utf8'));
+    const encoded = data && data.os_crypt && data.os_crypt.encrypted_key;
+    if (!encoded) return null;
+    let encryptedKey = Buffer.from(String(encoded), 'base64');
+    if (encryptedKey.slice(0, 5).toString('ascii') === 'DPAPI') encryptedKey = encryptedKey.slice(5);
+    const key = windowsDpapiUnprotect(encryptedKey);
+    if (key && key.length) {
+      sodaChromiumKeyCache.set(localStatePath, key);
+      return key;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function stripChromiumCookieHostHash(plain, hostKey) {
+  const data = bufferFromSqliteBlob(plain);
+  const host = String(hostKey || '');
+  if (!host || data.length <= 32) return data;
+  try {
+    const expected = crypto.createHash('sha256').update(host).digest();
+    if (data.subarray(0, 32).equals(expected)) return data.subarray(32);
+  } catch (e) {}
+  return data;
+}
+
+function decryptChromiumAesCookie(encryptedValue, dbPath, hostKey) {
+  const encrypted = bufferFromSqliteBlob(encryptedValue);
+  if (encrypted.length < 3 || !/^v1[01]$/i.test(encrypted.subarray(0, 3).toString('ascii'))) return '';
+  for (const localStatePath of sodaLocalStateCandidatesForCookieDb(dbPath)) {
+    const key = readChromiumOsCryptKey(localStatePath);
+    if (!key || key.length !== 32 || encrypted.length <= 31) continue;
+    try {
+      const nonce = encrypted.subarray(3, 15);
+      const tag = encrypted.subarray(encrypted.length - 16);
+      const cipherText = encrypted.subarray(15, encrypted.length - 16);
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
+      decipher.setAuthTag(tag);
+      const plain = Buffer.concat([decipher.update(cipherText), decipher.final()]);
+      return stripChromiumCookieHostHash(plain, hostKey).toString('utf8');
+    } catch (e) {}
+  }
+  return '';
+}
+
+function decryptSodaCookieValue(row, dbPath) {
+  if (!row) return '';
+  const plainValue = String(row.value || '').trim();
+  if (plainValue) return plainValue;
+  const encrypted = row.encrypted_value ? bufferFromSqliteBlob(row.encrypted_value) : bufferFromHex(row.encrypted_value_hex);
+  if (!encrypted.length) return '';
+  const aesValue = decryptChromiumAesCookie(encrypted, dbPath, row.host_key);
+  if (aesValue) return aesValue.trim();
+  const dpapiValue = windowsDpapiUnprotect(encrypted);
+  return dpapiValue ? stripChromiumCookieHostHash(dpapiValue, row.host_key).toString('utf8').trim() : '';
 }
 
 function readCookieRowsWithNodeSqlite(dbPath) {
@@ -2933,7 +3236,7 @@ function readCookieRowsWithNodeSqlite(dbPath) {
     const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
     try {
       return db.prepare(
-        "select host_key,name,value,path,last_update_utc,creation_utc from cookies where host_key like ? and value != '' order by last_update_utc asc, creation_utc asc"
+        "select host_key,name,value,encrypted_value,path,last_update_utc,creation_utc from cookies where host_key like ? and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc"
       ).all('%qishui.com%');
     } finally {
       try { db.close(); } catch (e) {}
@@ -2945,7 +3248,7 @@ function readCookieRowsWithNodeSqlite(dbPath) {
 
 function readCookieRowsWithSqliteCli(dbPath) {
   try {
-    const sql = "select host_key,name,value,path,last_update_utc,creation_utc from cookies where host_key like '%qishui.com%' and value != '' order by last_update_utc asc, creation_utc asc";
+    const sql = "select host_key,name,value,hex(encrypted_value),path,last_update_utc,creation_utc from cookies where host_key like '%qishui.com%' and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc";
     const out = execFileSync('sqlite3', ['-separator', '\t', dbPath, sql], {
       encoding: 'utf8',
       timeout: 3000,
@@ -2954,7 +3257,7 @@ function readCookieRowsWithSqliteCli(dbPath) {
     });
     return String(out || '').split(/\r?\n/).map(line => {
       const parts = line.split('\t');
-      return parts.length >= 3 ? { host_key: parts[0], name: parts[1], value: parts[2], path: parts[3] || '' } : null;
+      return parts.length >= 4 ? { host_key: parts[0], name: parts[1], value: parts[2], encrypted_value_hex: parts[3], path: parts[4] || '' } : null;
     }).filter(Boolean);
   } catch (e) {
     return null;
@@ -2965,33 +3268,50 @@ function readSodaCookieRows(dbPath) {
   return readCookieRowsWithNodeSqlite(dbPath) || readCookieRowsWithSqliteCli(dbPath) || [];
 }
 
-function sodaClientDetected() {
-  return sodaKnownUserDataDirs().some(pathExistsDir) || !!resolveSodaOfficialClientDir();
+function sodaClientDetected(forceScan) {
+  if (forceScan) return !!resolveSodaOfficialClientDir();
+  if (sodaOfficialClientDirCache && sodaOfficialClientDirCache.clientDir && isSodaOfficialClientDir(sodaOfficialClientDirCache.clientDir)) return true;
+  return !!readSodaClientScanCache();
 }
 
 function sodaLocalSyncMessage() {
+  if (!sodaLastLocalSync.userDataDirs.length) return '\u672a\u627e\u5230\u6c7d\u6c34\u97f3\u4e50\u672c\u673a\u6570\u636e\u76ee\u5f55\uff0c\u8bf7\u5148\u5b89\u88c5\u5e76\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5b8c\u6210\u767b\u5f55';
+  if (!sodaLastLocalSync.cookieDbs.length) return '\u5df2\u627e\u5230\u6c7d\u6c34\u97f3\u4e50\u6570\u636e\u76ee\u5f55\uff0c\u4f46\u6ca1\u6709\u53d1\u73b0\u767b\u5f55 Cookie \u6570\u636e\u5e93\uff0c\u8bf7\u5148\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5b8c\u6210\u767b\u5f55';
+  if (!sodaLastLocalSync.cookies) return '\u5df2\u627e\u5230\u6c7d\u6c34\u97f3\u4e50 Cookie \u6570\u636e\u5e93\uff0c\u4f46\u6ca1\u6709\u8bfb\u53d6\u5230\u6709\u6548\u767b\u5f55\u4f1a\u8bdd\uff0c\u8bf7\u786e\u8ba4\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5df2\u767b\u5f55';
+  if (!sodaLastLocalSync.clientDir) return '\u5df2\u8bfb\u5230\u6c7d\u6c34\u97f3\u4e50\u767b\u5f55\u6570\u636e\uff0c\u4f46\u672a\u5b9a\u4f4d\u5ba2\u6237\u7aef\u5b89\u88c5\u76ee\u5f55\uff1b\u4e0d\u5f71\u54cd\u767b\u5f55\u540c\u6b65\uff0c\u64ad\u653e\u7b7e\u540d\u4f1a\u7ee7\u7eed\u81ea\u52a8\u5c1d\u8bd5\u68c0\u6d4b';
+  return '';
+  if (!sodaLastLocalSync.clientDir) return '未检测到已安装的汽水音乐客户端，请先安装汽水音乐并完成登录';
   if (!sodaLastLocalSync.userDataDirs.length) return '未找到汽水音乐本机数据目录，请先安装并打开汽水音乐客户端完成登录';
   if (!sodaLastLocalSync.cookieDbs.length) return '已找到汽水音乐数据目录，但没有发现登录 Cookie 数据库，请先打开汽水音乐客户端完成登录';
   if (!sodaLastLocalSync.cookies) return '已找到汽水音乐 Cookie 数据库，但没有读取到有效登录会话，请确认汽水音乐客户端已登录';
   return '';
 }
 
-function readSodaCookieFromClient() {
-  const userDataDirs = sodaKnownUserDataDirs().filter(pathExistsDir);
-  const cookieDbs = sodaCookieDbCandidates();
+function readSodaCookieFromClient(opts) {
+  opts = opts || {};
+  let userDataDirs = sodaKnownUserDataDirs({ discover: false }).filter(pathExistsDir);
+  let cookieDbs = sodaCookieDbCandidates({ discover: false });
+  if (!cookieDbs.length) {
+    cookieDbs = sodaCookieDbCandidates({ discover: true });
+    userDataDirs = sodaKnownUserDataDirs({ discover: true }).filter(pathExistsDir);
+  }
   const picked = new Map();
   let lastError = '';
   for (const dbPath of cookieDbs) {
     try {
       for (const row of readSodaCookieRows(dbPath)) {
-        collectCookiePair(picked, row && row.name, row && row.value);
+        collectCookiePair(picked, row && row.name, decryptSodaCookieValue(row, dbPath));
       }
     } catch (e) {
       lastError = e.message || String(e);
     }
   }
+  const clientDir = opts.detectClient === false
+    ? (sodaOfficialClientDirCache && sodaOfficialClientDirCache.clientDir || readSodaClientScanCache())
+    : resolveSodaOfficialClientDir({ allowGlobalScan: opts.allowGlobalScan !== false });
   sodaLastLocalSync = {
     checkedAt: Date.now(),
+    clientDir: clientDir || '',
     userDataDirs,
     cookieDbs,
     cookies: picked.size,
@@ -3000,9 +3320,9 @@ function readSodaCookieFromClient() {
   return Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
-function refreshSodaCookieFromClient(force) {
-  if (!force && !sodaAutoSyncEnabled) return sodaCookie;
-  const clientCookie = readSodaCookieFromClient();
+function refreshSodaCookieFromClient(force, opts) {
+  if (!force || !sodaAutoSyncEnabled) return sodaCookie;
+  const clientCookie = readSodaCookieFromClient(opts);
   if (clientCookie && clientCookie !== sodaCookie) {
     saveSodaCookie(clientCookie);
     sodaLoginInfoCache = null;
@@ -3167,7 +3487,7 @@ async function sodaApiRequest(apiPath, params, opts) {
   let body = null;
   const headers = {
     accept: 'application/json',
-    'user-agent': sodaUserAgent(),
+    'user-agent': sodaUserAgent({ noClientScan: opts.noClientScan || opts.security === false }),
   };
   if (sodaCookie) headers.cookie = sodaCookie;
   if (opts.body) {
@@ -3476,21 +3796,38 @@ async function handleSodaSearch(keywords, limit) {
 
 async function getSodaLoginInfo(opts) {
   opts = opts || {};
-  if (opts.sync || (!opts.skipLocalSync && !sodaCookie)) refreshSodaCookieFromClient(!!opts.sync);
+  if (opts.sync) refreshSodaCookieFromClient(true, { detectClient: false, allowGlobalScan: false });
   const now = Date.now();
   const canUseCache = !opts.sync && sodaLoginInfoCache && sodaLoginInfoCache.cookie === sodaCookie && now - sodaLoginInfoCacheAt < SODA_LOGIN_INFO_CACHE_MS;
   if (canUseCache) return { ...sodaLoginInfoCache.info };
   const cookieObj = sodaCookieObject();
-  if (!sodaCookie || !(cookieObj.sessionid || cookieObj.sid_tt || cookieObj.uid_tt)) {
-    const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: !!sodaUserDataDir() };
-    emptyInfo.clientDetected = sodaClientDetected();
+  if (!opts.sync) {
+    const fastInfo = {
+      provider: 'soda',
+      loggedIn: false,
+      vipType: 0,
+      vipLevel: 'none',
+      isVip: false,
+      isSvip: false,
+      vipLabel: '无VIP',
+      hasCookie: !!sodaCookie,
+      clientDetected: sodaClientDetected(false),
+      message: sodaCookieHasLoginTicket(cookieObj) ? '已保存汽水登录凭据，点击“读取本机登录”刷新状态' : sodaLocalSyncMessage(),
+    };
+    sodaLoginInfoCache = { cookie: sodaCookie, info: fastInfo };
+    sodaLoginInfoCacheAt = now;
+    return { ...fastInfo };
+  }
+  if (!sodaCookie || !sodaCookieHasLoginTicket(cookieObj)) {
+    const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: false };
+    emptyInfo.clientDetected = sodaClientDetected(false);
     emptyInfo.message = sodaLocalSyncMessage();
     sodaLoginInfoCache = { cookie: sodaCookie, info: emptyInfo };
     sodaLoginInfoCacheAt = now;
     return { ...emptyInfo };
   }
   try {
-    const body = await sodaApiRequest('/luna/pc/me', {}, { syncCookie: false });
+    const body = await sodaApiRequest('/luna/pc/me', {}, { syncCookie: false, security: false, noClientScan: true });
     const info = body.my_info || body.user || body.data || {};
     const id = String(info.id || info.user_id || info.uid || '');
     const cachedVipLevel = readSodaCachedVipLevel(id);
@@ -3503,15 +3840,14 @@ async function getSodaLoginInfo(opts) {
       avatar: sodaImageUrl(info.larger_avatar_url || info.medium_avatar_url || info.avatar || info.avatar_url),
       ...vip,
       hasCookie: true,
-      clientDetected: true,
+      clientDetected: sodaClientDetected(false),
     };
-    result.clientDetected = sodaClientDetected();
     sodaLoginInfoCache = { cookie: sodaCookie, info: result };
     sodaLoginInfoCacheAt = now;
     return { ...result };
   } catch (e) {
     const errorInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: true, error: e.message };
-    errorInfo.clientDetected = sodaClientDetected();
+    errorInfo.clientDetected = sodaClientDetected(false);
     errorInfo.message = e.message || sodaLocalSyncMessage();
     sodaLoginInfoCache = { cookie: sodaCookie, info: errorInfo };
     sodaLoginInfoCacheAt = now;
@@ -6576,8 +6912,7 @@ const server = http.createServer(async (req, res) => {
   if (pn === '/api/soda/logout') {
     sodaAutoSyncEnabled = false;
     saveSodaCookie('');
-    sodaLoginInfoCache = null;
-    sodaLoginInfoCacheAt = 0;
+    clearSodaRuntimeCaches({ removeStateFiles: true });
     sendJSON(res, { provider: 'soda', ok: true, loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP' });
     return;
   }
