@@ -50,6 +50,8 @@ const {
   sati_resource_sub_list,
   lyric,
   lyric_new,
+  vip_info,
+  vip_info_v2,
 } = require('NeteaseCloudMusicApi');
 const http = require('http');
 const https = require('https');
@@ -57,6 +59,9 @@ const fs   = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const tls = require('tls');
+const zlib = require('zlib');
+const os = require('os');
+const { execFileSync, spawn } = require('child_process');
 const { once } = require('events');
 const { fileURLToPath } = require('url');
 const { analyzePodcastDjStream, analyzePodcastDjIntro } = require('./dj-analyzer');
@@ -66,6 +71,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const COOKIE_FILE = process.env.COOKIE_FILE || path.join(__dirname, '.cookie');
 const QQ_COOKIE_FILE = process.env.QQ_COOKIE_FILE || path.join(__dirname, '.qq-cookie');
+const SODA_COOKIE_FILE = process.env.SODA_COOKIE_FILE || path.join(__dirname, '.soda-cookie');
 const UPDATE_WORK_DIR = process.env.MINERADIO_UPDATE_DIR || path.join(__dirname, 'updates');
 const UPDATE_DOWNLOAD_DIR = process.env.MINERADIO_UPDATE_DOWNLOAD_DIR || path.join(UPDATE_WORK_DIR, 'downloads');
 const UPDATE_PATCH_BACKUP_DIR = process.env.MINERADIO_PATCH_BACKUP_DIR || path.join(UPDATE_WORK_DIR, 'backups', 'patches');
@@ -94,6 +100,13 @@ const WEATHER_DEFAULT_LOCATION = {
 };
 
 const updateDownloadJobs = new Map();
+
+let ffmpegBinaryPath = process.env.FFMPEG_PATH || '';
+try {
+  if (!ffmpegBinaryPath) ffmpegBinaryPath = require('@ffmpeg-installer/ffmpeg').path;
+} catch (e) {
+  ffmpegBinaryPath = '';
+}
 
 function applySystemCertificateAuthorities() {
   try {
@@ -192,6 +205,14 @@ catch (e) { qqCookie = ''; }
 function saveQQCookie(c) {
   qqCookie = normalizeCookieHeader(c) || rawCookieFallback(c);
   try { fs.writeFileSync(QQ_COOKIE_FILE, qqCookie); } catch (e) {}
+}
+
+let sodaCookie = '';
+try { if (fs.existsSync(SODA_COOKIE_FILE)) sodaCookie = fs.readFileSync(SODA_COOKIE_FILE, 'utf8').trim(); }
+catch (e) { sodaCookie = ''; }
+function saveSodaCookie(c) {
+  sodaCookie = normalizeCookieHeader(c) || rawCookieFallback(c);
+  try { fs.writeFileSync(SODA_COOKIE_FILE, sodaCookie); } catch (e) {}
 }
 
 // ---------- 工具 ----------
@@ -1495,6 +1516,75 @@ function playbackRestriction(provider, category, message, action, extra) {
     ...(extra || {}),
   };
 }
+function parsePlaybackFlag(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const raw = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(raw)) return false;
+  return null;
+}
+function parsePlaybackNumber(value) {
+  if (value === undefined || value === null || value === '') return NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
+}
+function playbackRequestOptionsFromSearchParams(params) {
+  params = params || new URLSearchParams();
+  const fee = parsePlaybackNumber(params.get('fee') || params.get('songFee') || params.get('payFee'));
+  const previewDuration = parsePlaybackNumber(params.get('previewDuration') || params.get('auditionDuration'));
+  return {
+    songFee: Number.isFinite(fee) ? Math.max(0, fee) : 0,
+    songPlayable: parsePlaybackFlag(params.get('songPlayable') || params.get('playable')),
+    trialHint: parsePlaybackFlag(params.get('trialHint') || params.get('trial')) === true,
+    previewDuration: Number.isFinite(previewDuration) ? Math.max(0, previewDuration) : 0,
+    qqTrialMid: String(params.get('trialMid') || params.get('trialMediaMid') || params.get('qqTrialMid') || '').trim(),
+  };
+}
+function playbackRequestFee(options, data) {
+  options = options || {};
+  data = data || {};
+  const values = [
+    options.songFee,
+    options.fee,
+    data.fee,
+    data.payFee,
+    data.pay_fee,
+    data.feeType,
+    data.fee_type,
+  ];
+  let fee = 0;
+  for (const value of values) {
+    const n = parsePlaybackNumber(value);
+    if (Number.isFinite(n) && n > fee) fee = n;
+  }
+  return fee;
+}
+function providerHasMembership(provider, status) {
+  status = status || {};
+  const raw = String(status.vipLevel || status.vip_level || '').toLowerCase();
+  const vipType = Number(status.vipType || status.vip_type || status.vip || status.musicVipLevel || status.music_vip_level || status.greenVipLevel || status.green_vip_level || status.luxuryVipLevel || status.luxury_vip_level || status.memberType || status.member_type || status.membershipType || status.membership_type || 0) || 0;
+  if (raw === 'vip' || raw === 'svip') return true;
+  if (status.isVip === true || status.is_vip === true || status.isSvip === true || status.is_svip === true) return true;
+  return vipType > 0;
+}
+function shouldMarkPlayableAsTrial(provider, options, status, data) {
+  options = options || {};
+  data = data || {};
+  const fee = playbackRequestFee(options, data);
+  const hinted = !!options.trialHint || fee > 0 || Number(options.previewDuration || 0) > 0;
+  if (!hinted) return false;
+  return !providerHasMembership(provider, status);
+}
+function playableTrialRestriction(provider, fee, status, extra) {
+  const label = provider === 'qq' ? 'QQ 音乐' : (provider === 'soda' ? '汽水音乐' : '网易云音乐');
+  return playbackRestriction(
+    provider,
+    'trial_only',
+    label + '当前账号未识别到会员，正在播放试听片段',
+    'upgrade',
+    { fee: Number(fee) || 0, loggedIn: !!(status && status.loggedIn), ...(extra || {}) }
+  );
+}
 function classifyNeteasePlaybackRestriction(lastData, loginInfo) {
   const loggedIn = !!(loginInfo && loginInfo.loggedIn);
   const fee = Number(lastData && lastData.fee);
@@ -1520,6 +1610,9 @@ function classifyNeteasePlaybackRestriction(lastData, loginInfo) {
 function classifyQQPlaybackRestriction(info, session) {
   const hasSession = typeof session === 'object' ? !!session.hasSession : !!session;
   const hasPlaybackKey = typeof session === 'object' ? !!session.hasPlaybackKey : hasSession;
+  const songFee = Number(session && session.songFee || 0) || 0;
+  const hasVip = !!(session && session.hasVip);
+  const hasTrial = !!(session && session.hasTrial);
   const rawMsg = String((info && (info.msg || info.tips || info.errmsg || info.message)) || '').trim();
   const code = Number((info && (info.result || info.code || info.errtype)) || 0);
   const lower = rawMsg.toLowerCase();
@@ -1529,8 +1622,14 @@ function classifyQQPlaybackRestriction(info, session) {
   if (!hasPlaybackKey && code === 104003) {
     return playbackRestriction('qq', 'login_required', 'QQ 音乐当前只拿到了网页登录状态，还缺少播放授权，请重新打开官方 QQ 音乐登录窗口完成授权', 'login', { code, rawMessage: rawMsg, missingPlaybackKey: true });
   }
+  if ((code === 104003 || code === 104009 || !code) && songFee > 0 && hasTrial && !hasVip) {
+    return playbackRestriction('qq', 'trial_ticket_unavailable', '检测到 QQ 音乐有试听片段，但当前接口没有返回试听播放票据，请重新登录 QQ 音乐后再试', 'login', { code, rawMessage: rawMsg, songFee, hasTrial: true });
+  }
+  if (code === 104003 && songFee > 0 && !hasVip) {
+    return playbackRestriction('qq', 'paid_required', 'QQ 音乐当前版本没有返回完整或试听地址，正在尝试同平台可播版本', 'upgrade', { code, rawMessage: rawMsg, songFee });
+  }
   if (code === 104003) {
-    return playbackRestriction('qq', 'copyright_unavailable', 'QQ 音乐没有给当前版本返回播放地址，通常是版权、会员或官方版本限制，可以换一个搜索结果或切到网易云源', 'switch_source', { code, rawMessage: rawMsg });
+    return playbackRestriction('qq', 'copyright_unavailable', 'QQ 音乐当前版本没有返回完整或试听地址，已尝试查找同平台可播版本', 'switch_source', { code, rawMessage: rawMsg });
   }
   if (/vip|会员|付费|购买|数字专辑|专辑|pay/.test(lower + rawMsg)) {
     return playbackRestriction('qq', 'paid_required', 'QQ 音乐歌曲需要会员、购买或数字专辑权限', 'upgrade', { code, rawMessage: rawMsg });
@@ -1548,11 +1647,14 @@ const NETEASE_QUALITY_CANDIDATES = [
   { level: 'standard', br: 128000,  label: '标准' },
 ];
 const QQ_QUALITY_CANDIDATE_TEMPLATES = [
-  { prefix: 'RS01', ext: '.flac', level: 'hires', label: 'Hi-Res FLAC' },
-  { prefix: 'F000', ext: '.flac', level: 'lossless', label: '无损 FLAC' },
-  { prefix: 'M800', ext: '.mp3', level: 'exhigh', label: '320k MP3' },
-  { prefix: 'M500', ext: '.mp3', level: 'standard', label: '128k MP3' },
-  { prefix: 'C400', ext: '.m4a', level: 'aac', label: 'AAC/M4A' },
+  { prefix: 'RS01', ext: '.flac', level: 'hires', label: 'Hi-Res FLAC', br: 1999000 },
+  { prefix: 'F000', ext: '.flac', level: 'lossless', label: '无损 FLAC', br: 1411000 },
+  { prefix: 'M800', ext: '.mp3', level: 'exhigh', label: '320k MP3', br: 320000 },
+  { prefix: 'M500', ext: '.mp3', level: 'standard', label: '128k MP3', br: 128000 },
+  { prefix: 'C400', ext: '.m4a', level: 'standard', label: 'AAC/M4A', br: 128000 },
+  { prefix: 'RS02', ext: '.mp3', level: 'standard', label: 'QQ 试听 MP3', br: 96000, trial: true },
+  { prefix: 'C100', ext: '.m4a', level: 'standard', label: '试听 AAC', br: 96000, trial: true },
+  { prefix: 'C200', ext: '.m4a', level: 'standard', label: '试听 AAC', br: 96000, trial: true },
 ];
 function normalizeQualityPreference(value) {
   const raw = String(value || '').toLowerCase().trim();
@@ -1568,6 +1670,33 @@ function qualityCandidatesFrom(target, candidates) {
   let start = candidates.findIndex(item => item.level === target);
   if (start < 0) start = 0;
   return candidates.slice(start);
+}
+function qualityPreferenceRank(level) {
+  level = normalizeQualityPreference(level);
+  if (level === 'jymaster') return 5;
+  if (level === 'hires') return 4;
+  if (level === 'lossless') return 3;
+  if (level === 'exhigh') return 2;
+  if (level === 'standard') return 1;
+  return 0;
+}
+function qualityLevelsAtOrBelow(level) {
+  const rank = qualityPreferenceRank(level);
+  return ['jymaster', 'hires', 'lossless', 'exhigh', 'standard'].filter(item => qualityPreferenceRank(item) <= rank);
+}
+function resolvedQualityFromLevelAndBitrate(requestedLevel, br, metaText) {
+  const text = String(metaText || '').toLowerCase();
+  if (/jy|master|母带|臻品|studio/.test(text)) return 'jymaster';
+  if (/hi[-_ ]?res|hires|高解析/.test(text)) return 'hires';
+  if (/lossless|flac|sq|无损/.test(text)) return 'lossless';
+  if (/exhigh|320|hq|极高|高品/.test(text)) return 'exhigh';
+  if (/standard|normal|128|std|标准|aac|m4a/.test(text)) return 'standard';
+  br = Number(br) || 0;
+  if (br >= 1800000) return 'hires';
+  if (br >= 900000) return 'lossless';
+  if (br >= 256000) return 'exhigh';
+  if (br > 0) return 'standard';
+  return normalizeQualityPreference(requestedLevel);
 }
 function hasNeteaseSvip(loginInfo) {
   return !!(loginInfo && loginInfo.loggedIn && (loginInfo.vipLevel === 'svip' || loginInfo.isSvip || Number(loginInfo.vipType || 0) >= 10));
@@ -2024,29 +2153,32 @@ async function handleQQDiscoverHome() {
 async function handleDiscoverHome(provider) {
   provider = String(provider || 'netease').toLowerCase();
   if (provider === 'qq') return handleQQDiscoverHome();
+  if (provider === 'soda') return handleSodaDiscoverHome();
   if (provider !== 'all') return handleNeteaseDiscoverHome();
-  const [neteaseResult, qqResult] = await Promise.allSettled([
+  const [neteaseResult, qqResult, sodaResult] = await Promise.allSettled([
     handleNeteaseDiscoverHome(),
     handleQQDiscoverHome(),
+    handleSodaDiscoverHome(),
   ]);
   const ne = neteaseResult.status === 'fulfilled' ? neteaseResult.value : { loggedIn: false, dailySongs: [], playlists: [], podcasts: [], radarSongs: [], newSongs: [], heartSongs: [], similarSongs: [], recommendationSongs: [] };
   const qq = qqResult.status === 'fulfilled' ? qqResult.value : { loggedIn: false, dailySongs: [], playlists: [], podcasts: [], radarSongs: [], newSongs: [], millionSongs: [], artistRoamSongs: [], recommendationSongs: [] };
-  const loggedIn = !!(ne.loggedIn || qq.loggedIn);
+  const soda = sodaResult.status === 'fulfilled' ? sodaResult.value : { loggedIn: false, dailySongs: [], playlists: [], podcasts: [], radarSongs: [], newSongs: [], heartSongs: [], similarSongs: [], recommendationSongs: [] };
+  const loggedIn = !!(ne.loggedIn || qq.loggedIn || soda.loggedIn);
   return {
     provider: 'all',
     loggedIn,
     user: null,
-    users: [ne, qq].filter(item => item && item.loggedIn).map(item => item.user).filter(Boolean),
-    dailySongs: mergeDiscoverLists([ne.dailySongs, qq.dailySongs], 16),
-    playlists: mergeDiscoverLists([ne.playlists, qq.playlists], 14),
-    podcasts: mergeDiscoverLists([ne.podcasts, qq.podcasts], 8),
-    radarSongs: mergeDiscoverLists([ne.radarSongs, qq.radarSongs], 24),
-    newSongs: mergeDiscoverLists([ne.newSongs, qq.newSongs], 24),
-    heartSongs: mergeDiscoverLists([ne.heartSongs, qq.millionSongs], 24),
-    similarSongs: mergeDiscoverLists([ne.similarSongs, qq.artistRoamSongs], 24),
+    users: [ne, qq, soda].filter(item => item && item.loggedIn).map(item => item.user).filter(Boolean),
+    dailySongs: mergeDiscoverLists([ne.dailySongs, qq.dailySongs, soda.dailySongs], 16),
+    playlists: mergeDiscoverLists([ne.playlists, qq.playlists, soda.playlists], 14),
+    podcasts: mergeDiscoverLists([ne.podcasts, qq.podcasts, soda.podcasts], 8),
+    radarSongs: mergeDiscoverLists([ne.radarSongs, qq.radarSongs, soda.radarSongs], 24),
+    newSongs: mergeDiscoverLists([ne.newSongs, qq.newSongs, soda.newSongs], 24),
+    heartSongs: mergeDiscoverLists([ne.heartSongs, qq.millionSongs, soda.heartSongs], 24),
+    similarSongs: mergeDiscoverLists([ne.similarSongs, qq.artistRoamSongs, soda.similarSongs], 24),
     millionSongs: qq.millionSongs || [],
     artistRoamSongs: qq.artistRoamSongs || [],
-    recommendationSongs: shuffledSample(mergeDiscoverLists([ne.recommendationSongs, qq.recommendationSongs], 40), 5),
+    recommendationSongs: shuffledSample(mergeDiscoverLists([ne.recommendationSongs, qq.recommendationSongs, soda.recommendationSongs], 40), 5),
     mode: loggedIn ? 'synced' : 'starter',
     updatedAt: Date.now(),
   };
@@ -2059,7 +2191,7 @@ const QQ_HEADERS = {
   'User-Agent': UA,
 };
 
-function requestText(targetUrl, opts, body) {
+function requestTextDetailed(targetUrl, opts, body) {
   opts = opts || {};
   return new Promise((resolve, reject) => {
     const u = new URL(targetUrl);
@@ -2074,14 +2206,19 @@ function requestText(targetUrl, opts, body) {
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
-        if (response.statusCode >= 400) {
+        if (response.statusCode >= 400 && !opts.allowHttpError) {
           const err = new Error('HTTP ' + response.statusCode);
           err.statusCode = response.statusCode;
           err.body = text;
+          err.headers = response.headers || {};
           reject(err);
           return;
         }
-        resolve(text);
+        resolve({
+          statusCode: response.statusCode,
+          headers: response.headers || {},
+          text,
+        });
       });
     });
     req.setTimeout(10000, () => req.destroy(new Error('Request timeout')));
@@ -2089,6 +2226,10 @@ function requestText(targetUrl, opts, body) {
     if (body) req.write(body);
     req.end();
   });
+}
+
+function requestText(targetUrl, opts, body) {
+  return requestTextDetailed(targetUrl, opts, body).then(result => result.text);
 }
 
 async function requestJson(targetUrl, opts, body) {
@@ -2100,6 +2241,1330 @@ async function requestJson(targetUrl, opts, body) {
     err.cause = e;
     throw err;
   }
+}
+
+const SODA_API_BASE = 'https://api.qishui.com';
+const SODA_APP_ID = '386088';
+const SODA_APP_NAME = 'luna_pc';
+const SODA_APP_VERSION = process.env.SODA_APP_VERSION || '3.5.1';
+const SODA_VERSION_CODE = process.env.SODA_VERSION_CODE || '30501';
+const SODA_DEFAULT_BUILD_ID = '36.4.0-rs.29.release.main.0';
+const SODA_PLAYBACK_SESSION_TTL_MS = 10 * 60 * 1000;
+const SODA_LOGIN_INFO_CACHE_MS = 8000;
+let sodaAutoSyncEnabled = true;
+let sodaDeviceInfoCache = null;
+let sodaNativeSecurity = null;
+let sodaLoginInfoCache = null;
+let sodaLoginInfoCacheAt = 0;
+const sodaPlaybackSessions = new Map();
+
+function sodaUserDataDir() {
+  return process.env.SODA_USER_DATA_DIR
+    || (process.env.APPDATA ? path.join(process.env.APPDATA, 'SodaMusic') : '');
+}
+
+function sodaKnownInstallRoots() {
+  const roots = [];
+  function pushRoot(root) {
+    if (root && roots.indexOf(root) < 0) roots.push(root);
+  }
+  pushRoot(process.env.SODA_INSTALL_DIR);
+  pushRoot(process.env.SODA_CLIENT_DIR);
+  pushRoot('D:\\InstallationPackage\\qsyy\\Soda Music');
+  if (process.env.LOCALAPPDATA) {
+    pushRoot(path.join(process.env.LOCALAPPDATA, 'Programs', 'Soda Music'));
+    pushRoot(path.join(process.env.LOCALAPPDATA, 'Soda Music'));
+  }
+  if (process.env.PROGRAMFILES) pushRoot(path.join(process.env.PROGRAMFILES, 'Soda Music'));
+  if (process.env['PROGRAMFILES(X86)']) pushRoot(path.join(process.env['PROGRAMFILES(X86)'], 'Soda Music'));
+  return roots;
+}
+
+function compareVersionText(a, b) {
+  const aa = String(a || '').split(/[^\d]+/).map(n => Number(n) || 0);
+  const bb = String(b || '').split(/[^\d]+/).map(n => Number(n) || 0);
+  const len = Math.max(aa.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    if ((aa[i] || 0) !== (bb[i] || 0)) return (aa[i] || 0) - (bb[i] || 0);
+  }
+  return String(a || '').localeCompare(String(b || ''));
+}
+
+function sodaBdticketNodePath(versionDir) {
+  return versionDir ? path.join(versionDir, 'resources', 'app.asar.unpacked', 'bdticket.node') : '';
+}
+
+function sodaBdmsNodePath(versionDir) {
+  return versionDir ? path.join(versionDir, 'resources', 'app.asar.unpacked', 'bdms.node') : '';
+}
+
+function sodaDeviceNodePath(versionDir) {
+  return versionDir ? path.join(versionDir, 'resources', 'app.asar.unpacked', 'device.node') : '';
+}
+
+function resolveSodaOfficialClientDir() {
+  const explicitNode = process.env.SODA_BDTICKET_NODE || process.env.SODA_BDMS_NODE;
+  if (explicitNode) {
+    const unpacked = path.dirname(explicitNode);
+    const resources = path.dirname(unpacked);
+    const versionDir = path.dirname(resources);
+    if (fs.existsSync(sodaBdticketNodePath(versionDir)) && fs.existsSync(sodaBdmsNodePath(versionDir))) return versionDir;
+  }
+  const candidates = [];
+  for (const root of sodaKnownInstallRoots()) {
+    try {
+      if (!root || !fs.existsSync(root)) continue;
+      if (fs.existsSync(sodaBdticketNodePath(root)) && fs.existsSync(sodaBdmsNodePath(root))) candidates.push(root);
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const dir = path.join(root, entry.name);
+        if (fs.existsSync(sodaBdticketNodePath(dir)) && fs.existsSync(sodaBdmsNodePath(dir))) candidates.push(dir);
+      }
+    } catch (e) {}
+  }
+  candidates.sort((a, b) => compareVersionText(path.basename(b), path.basename(a)));
+  return candidates[0] || '';
+}
+
+function readSodaBuildId(versionDir) {
+  const file = versionDir ? path.join(versionDir, 'version') : '';
+  try {
+    const text = file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '';
+    return text || SODA_DEFAULT_BUILD_ID;
+  } catch (e) {
+    return SODA_DEFAULT_BUILD_ID;
+  }
+}
+
+function sodaUserAgent() {
+  const versionDir = sodaNativeSecurity && sodaNativeSecurity.clientDir || resolveSodaOfficialClientDir();
+  const buildId = process.env.SODA_BUILD_ID || readSodaBuildId(versionDir);
+  return `LunaPC/${SODA_APP_VERSION}(${buildId || SODA_DEFAULT_BUILD_ID})`;
+}
+
+function toHeaderValueList(value) {
+  if (Array.isArray(value)) return value.map(item => String(item));
+  if (value === undefined || value === null) return [];
+  return [String(value)];
+}
+
+function lowerCaseHeaderObject(headers) {
+  const out = {};
+  Object.keys(headers || {}).forEach(key => {
+    const value = headers[key];
+    if (value === undefined || value === null) return;
+    out[String(key).toLowerCase()] = String(value);
+  });
+  return out;
+}
+
+function normalizeResponseHeadersForBdticket(headers) {
+  const out = {};
+  Object.keys(headers || {}).forEach(key => {
+    const values = toHeaderValueList(headers[key]);
+    if (values.length) out[String(key).toLowerCase()] = values;
+  });
+  return out;
+}
+
+function sodaBdticketSettings() {
+  const reePath = [
+    '/luna/pc/track_v2/',
+    '/luna/track_v2/',
+    '/luna/h5/track_v2/',
+    '/luna/pc/me/collection/media/',
+    '/luna/pc/user/me/privacy/setting/',
+    '/luna/pc/me/collection/playlist/',
+    '/luna/pc/me/collection/album/',
+    '/luna/pc/me/follow/',
+    '/luna/pc/me/collection/artist/',
+    '/webcast/room/create/',
+    '/web/api/media/user/info/',
+    '/passport/token/beat/web/',
+  ];
+  return {
+    session_guard_config: {
+      enable: true,
+      ree_path: reePath,
+      ree_path_prefix: [],
+      ree_exclude_path: [],
+      ree_exclude_path_prefix: [],
+      ree_enable_symmetric: true,
+      config_version: '20251029.1',
+    },
+    enable_full_path_track: true,
+  };
+}
+
+function readSodaDeviceInfoFresh() {
+  const dir = sodaUserDataDir();
+  const file = dir ? path.join(dir, 'DeviceV1') : '';
+  if (!file || !fs.existsSync(file)) return {};
+  try {
+    const raw = fs.readFileSync(file);
+    let text = '';
+    try { text = zlib.gunzipSync(raw).toString('utf8'); }
+    catch (e1) {
+      try { text = zlib.inflateSync(raw).toString('utf8'); }
+      catch (e2) { text = raw.toString('utf8'); }
+    }
+    return JSON.parse(text.replace(/\u0000/g, '').trim());
+  } catch (e) {
+    return {};
+  }
+}
+
+function initSodaNativeSecurity() {
+  if (sodaNativeSecurity && sodaNativeSecurity.ready) return sodaNativeSecurity;
+  const state = sodaNativeSecurity || { ready: false, bdms: null, bdticket: null, device: null, clientDir: '', bdticketStarted: false, bdmsInitedForDevice: '' };
+  sodaNativeSecurity = state;
+  const clientDir = resolveSodaOfficialClientDir();
+  state.clientDir = clientDir;
+  if (!clientDir) return state;
+  try {
+    if (!state.bdms) state.bdms = require(sodaBdmsNodePath(clientDir));
+  } catch (e) {
+    state.bdms = null;
+  }
+  try {
+    if (!state.bdticket) {
+      state.bdticket = require(sodaBdticketNodePath(clientDir));
+      state.bdticket.registerEventEmitter((name, data, callback) => {
+        if (name === 'pc_request_cert') {
+          sodaRequestClientCert(data, callback).catch(err => {
+            try {
+              if (typeof callback === 'function') callback({ data: {} }, '', { httpStatusCode: 500, message: err && err.message || 'client cert failed' });
+            } catch (e) {}
+          });
+        }
+      });
+    }
+    if (state.bdticket && !state.bdticketStarted) {
+      state.bdticket.startBDTicket(sodaUserDataDir());
+      state.bdticketStarted = true;
+    }
+    if (state.bdticket) state.bdticket.refreshSettings(sodaBdticketSettings());
+  } catch (e) {
+    state.bdticket = null;
+  }
+  try {
+    if (!state.device && fs.existsSync(sodaDeviceNodePath(clientDir))) state.device = require(sodaDeviceNodePath(clientDir));
+  } catch (e) {
+    state.device = null;
+  }
+  state.ready = !!(state.bdms || state.bdticket || state.device);
+  return state;
+}
+
+function sodaNativeDevice() {
+  const native = initSodaNativeSecurity();
+  if (native.device && typeof native.device.decodeSpade === 'function') return native.device;
+  const clientDir = native.clientDir || resolveSodaOfficialClientDir();
+  try {
+    if (clientDir && fs.existsSync(sodaDeviceNodePath(clientDir))) {
+      native.device = require(sodaDeviceNodePath(clientDir));
+    }
+  } catch (e) {
+    native.device = null;
+  }
+  return native.device && typeof native.device.decodeSpade === 'function' ? native.device : null;
+}
+
+function sodaCookieObject() {
+  return parseCookieString(sodaCookie);
+}
+
+function readSodaCookieFromClient() {
+  const dir = sodaUserDataDir();
+  const db = dir ? path.join(dir, 'Network', 'Cookies') : '';
+  if (!db || !fs.existsSync(db)) return '';
+  try {
+    const sql = "select name,value from cookies where host_key like '%qishui.com%' and value != ''";
+    const out = execFileSync('sqlite3', ['-separator', '\t', db, sql], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const picked = new Map();
+    String(out || '').split(/\r?\n/).forEach(line => {
+      const idx = line.indexOf('\t');
+      if (idx <= 0) return;
+      collectCookiePair(picked, line.slice(0, idx), line.slice(idx + 1));
+    });
+    return Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+  } catch (e) {
+    return '';
+  }
+}
+
+function refreshSodaCookieFromClient(force) {
+  if (!force && !sodaAutoSyncEnabled) return sodaCookie;
+  const clientCookie = readSodaCookieFromClient();
+  if (clientCookie && clientCookie !== sodaCookie) {
+    saveSodaCookie(clientCookie);
+    sodaLoginInfoCache = null;
+    sodaLoginInfoCacheAt = 0;
+  }
+  return sodaCookie;
+}
+
+function readSodaDeviceInfo() {
+  if (!sodaDeviceInfoCache) sodaDeviceInfoCache = readSodaDeviceInfoFresh();
+  return sodaDeviceInfoCache || {};
+}
+
+function sodaCommonParams(extra) {
+  const device = readSodaDeviceInfo();
+  return {
+    aid: SODA_APP_ID,
+    app_name: SODA_APP_NAME,
+    region: 'cn',
+    geo_region: 'cn',
+    os_region: 'cn',
+    sim_region: '',
+    device_id: device.did || process.env.SODA_DEVICE_ID || '',
+    cdid: device.cdid || '',
+    iid: device.iid || process.env.SODA_IID || '',
+    version_name: SODA_APP_VERSION,
+    version_code: SODA_VERSION_CODE,
+    channel: '0',
+    build_mode: 'release',
+    network_carrier: '',
+    ac: 'wifi',
+    tz_name: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    resolution: '',
+    device_platform: 'windows',
+    device_type: 'Windows',
+    os: 'windows',
+    os_version: os.release(),
+    fp: device.did || process.env.SODA_DEVICE_ID || '',
+    ...(extra || {}),
+  };
+}
+
+function applySodaBdmsSignature(targetUrl, headers) {
+  const native = initSodaNativeSecurity();
+  const device = readSodaDeviceInfo();
+  if (!native.bdms || !device.did) return;
+  try {
+    if (native.bdmsInitedForDevice !== device.did) {
+      native.bdms.init({ deviceId: device.did });
+      native.bdmsInitedForDevice = device.did;
+    }
+    const headerLines = [];
+    Object.keys(headers || {}).forEach(key => {
+      for (const value of toHeaderValueList(headers[key])) {
+        headerLines.push(`${String(key).toLowerCase()}\r\n${value}`);
+      }
+    });
+    const signatureData = String(native.bdms.generateHttpSignatureHeaders(targetUrl, headerLines.join('\r\n')) || '')
+      .split('\r\n')
+      .filter(item => item && item.trim());
+    for (let i = 0; i < signatureData.length / 2; i++) {
+      headers[signatureData[i * 2]] = signatureData[i * 2 + 1];
+    }
+  } catch (e) {}
+}
+
+function applySodaBdticketSignature(targetUrl, headers) {
+  const native = initSodaNativeSecurity();
+  if (!native.bdticket) return null;
+  try {
+    const u = new URL(targetUrl);
+    const cookieObj = sodaCookieObject();
+    const sessionID = String(cookieObj.sessionid || '');
+    const sessionSS = String(cookieObj.sessionid_ss || '');
+    const requestHeaders = lowerCaseHeaderObject(headers);
+    const result = native.bdticket.handleRequest(u.host, u.pathname, requestHeaders, sessionID, sessionSS) || {};
+    Object.keys(result.headers || {}).forEach(key => {
+      headers[key] = result.headers[key];
+    });
+    return {
+      host: u.host,
+      pathname: u.pathname,
+      requestHeaders,
+      sessionID,
+      sessionSS,
+      associated: result.associated || {},
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+function handleSodaBdticketResponse(ctx, targetUrl, responseHeaders) {
+  if (!ctx) return;
+  const native = initSodaNativeSecurity();
+  if (!native.bdticket) return;
+  try {
+    const headers = normalizeResponseHeadersForBdticket(responseHeaders);
+    let responseSessionId = '';
+    const setCookies = headers['set-cookie'] || [];
+    for (const item of setCookies) {
+      const parsed = parseCookieString(String(item || '').split(';')[0]);
+      if (parsed.sessionid) {
+        responseSessionId = parsed.sessionid;
+        break;
+      }
+    }
+    native.bdticket.handleResponse(ctx.host, ctx.pathname, headers, responseSessionId, ctx.requestHeaders, ctx.sessionID, ctx.sessionSS, ctx.associated || {});
+  } catch (e) {}
+}
+
+function mergeSodaSetCookie(setCookieHeaders) {
+  if (!setCookieHeaders) return;
+  const picked = new Map(Object.entries(parseCookieString(sodaCookie)));
+  collectCookieInput(setCookieHeaders, picked);
+  const next = Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+  if (next && next !== sodaCookie) {
+    saveSodaCookie(next);
+    sodaLoginInfoCache = null;
+    sodaLoginInfoCacheAt = 0;
+  }
+}
+
+async function sodaRequestClientCert(data, callback) {
+  const u = new URL('/passport/ticket_guard/get_client_cert/', SODA_API_BASE);
+  const params = sodaCommonParams({ is_from_ttaccountsdk: '1' });
+  Object.keys(params).forEach(key => {
+    const value = params[key];
+    if (value !== undefined && value !== null && value !== '') u.searchParams.set(key, String(value));
+  });
+  const form = new URLSearchParams(data && Object.keys(data).length ? data : { server_data: '1' }).toString();
+  const headers = {
+    accept: 'application/json',
+    'content-type': 'application/x-www-form-urlencoded',
+    'content-length': String(Buffer.byteLength(form)),
+    'user-agent': sodaUserAgent(),
+  };
+  const response = await requestTextDetailed(u.toString(), { method: 'POST', headers, allowHttpError: true }, form);
+  let body = {};
+  try { body = response.text ? JSON.parse(response.text) : {}; } catch (e) { body = {}; }
+  if (typeof callback === 'function') {
+    callback(
+      { data: body },
+      String(response.headers && response.headers['x-tt-logid'] || ''),
+      {
+        httpStatusCode: response.statusCode === 200 ? 0 : response.statusCode,
+        message: response.statusCode === 200 ? '' : ('get_client_cert failed with status: ' + response.statusCode),
+      }
+    );
+  }
+}
+
+async function sodaApiRequest(apiPath, params, opts) {
+  opts = opts || {};
+  if (opts.syncCookie !== false) refreshSodaCookieFromClient(false);
+  const u = new URL(apiPath, SODA_API_BASE);
+  const merged = sodaCommonParams(params);
+  Object.keys(merged).forEach(key => {
+    const value = merged[key];
+    if (value !== undefined && value !== null && value !== '') u.searchParams.set(key, String(value));
+  });
+  let body = null;
+  const headers = {
+    accept: 'application/json',
+    'user-agent': sodaUserAgent(),
+  };
+  if (sodaCookie) headers.cookie = sodaCookie;
+  if (opts.body) {
+    body = JSON.stringify(opts.body);
+    headers['content-type'] = 'application/json; charset=utf-8';
+    headers['content-length'] = String(Buffer.byteLength(body));
+    headers['x-ss-stub'] = crypto.createHash('md5').update(body).digest('hex').toUpperCase();
+  }
+  if (opts.security !== false && u.hostname.endsWith('qishui.com') && !u.pathname.includes('/passport/') && !u.pathname.includes('/ttwid/')) {
+    headers['x-luna-background-type'] = 'foreground';
+    headers['x-luna-is-background-req'] = '0';
+    headers['x-luna-is-local-user'] = sodaCookie ? '1' : '0';
+    applySodaBdmsSignature(u.toString(), headers);
+  }
+  const bdticketCtx = opts.security === false ? null : applySodaBdticketSignature(u.toString(), headers);
+  const response = await requestTextDetailed(u.toString(), { method: opts.method || (body ? 'POST' : 'GET'), headers }, body);
+  handleSodaBdticketResponse(bdticketCtx, u.toString(), response.headers);
+  mergeSodaSetCookie(response.headers && response.headers['set-cookie']);
+  const json = response.text ? JSON.parse(response.text) : {};
+  return json || {};
+}
+
+function sodaApiErrorMessage(body, fallback) {
+  return (body && body.status_info && (body.status_info.status_msg || body.status_info.message))
+    || (body && (body.message || body.msg || body.error))
+    || fallback
+    || '';
+}
+
+function isSodaKrcText(text) {
+  return typeof text === 'string'
+    && /^\[\d+,\d+\]/m.test(text)
+    && /<\d+,\d+,\d+>/.test(text);
+}
+
+function isSodaYrcText(text) {
+  return typeof text === 'string'
+    && /^\[\d+,\d+\]/m.test(text)
+    && /\(\d+,\d+,\d+\)/.test(text);
+}
+
+function isSodaLrcText(text) {
+  return typeof text === 'string' && /\[\d{1,2}:\d{1,2}(?:\.\d{1,3})?\]/.test(text);
+}
+
+function sodaMsToLrcTime(ms) {
+  ms = Math.max(0, Number(ms) || 0);
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  const centiseconds = Math.floor((ms % 1000) / 10);
+  return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0') + '.' + String(centiseconds).padStart(2, '0');
+}
+
+function sodaTimedLyricToYrc(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(line => {
+      const m = String(line || '').match(/^\[(\d+),(\d+)\](.*)$/);
+      if (!m) return '';
+      const body = (m[3] || '').replace(/<(\d+),(\d+),(\d+)>/g, '($1,$2,$3)');
+      return `[${m[1]},${m[2]}]${body}`;
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function sodaTimedLyricToLrc(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(line => {
+      const m = String(line || '').match(/^\[(\d+),(\d+)\](.*)$/);
+      if (!m) return '';
+      const plain = (m[3] || '')
+        .replace(/<\d+,\d+,\d+>/g, '')
+        .replace(/\(\d+,\d+,\d+\)/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return plain ? '[' + sodaMsToLrcTime(Number(m[1]) || 0) + ']' + plain : '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function collectSodaLyricCandidates(value, pathParts, out, depth) {
+  if (value == null || depth > 9) return;
+  const pathText = (pathParts || []).join('.').toLowerCase();
+  if (typeof value === 'string') {
+    const text = value.replace(/^\uFEFF/, '').trim();
+    if (!text) return;
+    let score = 0;
+    let format = '';
+    if (isSodaKrcText(text)) { score = 110; format = 'krc'; }
+    else if (isSodaYrcText(text)) { score = 100; format = 'yrc'; }
+    else if (isSodaLrcText(text)) { score = 90; format = 'lrc'; }
+    if (!score) return;
+    if (pathText === 'lyric.content') score += 40;
+    else if (pathText.includes('lyric')) score += 18;
+    if (/translation|translated|trans|tlyric/.test(pathText)) score -= 8;
+    out.push({ text, score, format, path: pathText });
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 80).forEach((item, index) => collectSodaLyricCandidates(item, (pathParts || []).concat('[' + index + ']'), out, depth + 1));
+    return;
+  }
+  if (typeof value !== 'object') return;
+  Object.keys(value).forEach(key => {
+    collectSodaLyricCandidates(value[key], (pathParts || []).concat(key), out, depth + 1);
+  });
+}
+
+function extractSodaLyricParts(body) {
+  const candidates = [];
+  collectSodaLyricCandidates(body, [], candidates, 0);
+  candidates.sort((a, b) => b.score - a.score);
+  const original = candidates.find(item => !/translation|translated|trans|tlyric/.test(item.path)) || candidates[0] || null;
+  const translated = candidates.find(item => /translation|translated|trans|tlyric/.test(item.path) && item !== original) || null;
+  function convert(candidate) {
+    if (!candidate) return { lyric: '', yrc: '', format: '' };
+    if (candidate.format === 'lrc') return { lyric: candidate.text, yrc: '', format: 'lrc' };
+    return {
+      lyric: sodaTimedLyricToLrc(candidate.text),
+      yrc: sodaTimedLyricToYrc(candidate.text),
+      format: candidate.format,
+    };
+  }
+  const main = convert(original);
+  const trans = convert(translated);
+  return {
+    lyric: main.lyric,
+    yrc: main.yrc,
+    tlyric: trans.lyric,
+    format: main.format,
+    sourcePath: original && original.path || '',
+  };
+}
+
+function sodaImageUrl(image) {
+  if (!image) return '';
+  if (typeof image === 'string') return /^https?:\/\//i.test(image) ? image : '';
+  const urls = Array.isArray(image.urls) ? image.urls : (Array.isArray(image.url_list) ? image.url_list : []);
+  const first = String(urls[0] || image.url || '').trim();
+  if (first && /^https?:\/\//i.test(first) && !/\/img\/?$/i.test(first)) return first;
+  const uri = String(image.uri || '').trim();
+  if (uri && /^https?:\/\//i.test(uri)) return uri;
+  if (first && uri) {
+    const suffix = image.template_prefix ? ('~' + String(image.template_prefix).replace(/^~/, '') + '-image.image') : '';
+    return first.replace(/\/?$/, '/') + uri.replace(/^\/+/, '') + suffix;
+  }
+  return '';
+}
+
+function sodaArtistList(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .map(a => ({
+      id: a && a.id || '',
+      name: a && (a.name || a.simple_display_name || a.display_name) || '',
+    }))
+    .filter(a => a.name);
+}
+
+function mapSodaTrack(raw) {
+  raw = raw || {};
+  const track = raw.track || raw.track_info || raw.song || raw;
+  const album = track.album || {};
+  const artists = sodaArtistList(track.artists || track.singers || []);
+  const id = String(track.id || track.track_id || raw.id || '');
+  const preview = track.preview || {};
+  const audition = track.audition_info || {};
+  return {
+    provider: 'soda',
+    source: 'soda',
+    type: 'soda',
+    id,
+    sodaId: id,
+    vid: track.vid || preview.vid || audition.vid || '',
+    name: track.name || track.title || '',
+    artist: artists.map(a => a.name).join(' / '),
+    artists,
+    artistId: artists[0] && artists[0].id,
+    album: album.name || album.title || '',
+    cover: sodaImageUrl(track.url_cover || track.cover || album.url_cover || album.cover || track.url_player_bg),
+    duration: Number(track.duration || track.duration_ms || 0) || 0,
+    fee: sodaTrackRequiresAccess(track) ? 1 : 0,
+    playable: true,
+    previewStart: Number(preview.start || audition.start_time_ms || 0) || 0,
+    previewDuration: Number(preview.duration || audition.duration_ms || 0) || 0,
+  };
+}
+
+function mapSodaTrackCandidate(item) {
+  item = item || {};
+  const entity = item.entity || item.data || item;
+  const track = entity.track_wrapper || entity.track || entity.track_info || entity.song || entity;
+  return mapSodaTrack(track);
+}
+
+function mapSodaPlaylist(pl) {
+  pl = pl || {};
+  const owner = pl.owner || pl.creator || {};
+  const id = String(pl.id || pl.playlist_id || '');
+  return {
+    provider: 'soda',
+    source: 'soda',
+    id,
+    name: pl.title || pl.name || '',
+    cover: sodaImageUrl(pl.url_cover || pl.cover || pl.cover_url),
+    trackCount: Number(pl.count_tracks || pl.track_count || pl.song_count || 0) || 0,
+    playCount: Number(pl.play_count || pl.play_count_show || 0) || 0,
+    creator: owner.nickname || owner.name || 'Soda Music',
+    subscribed: !!pl.subscribed,
+    specialType: 0,
+  };
+}
+
+function readSodaCachedVipLevel(userId) {
+  const id = String(userId || '').replace(/\D/g, '');
+  if (!id) return '';
+  const dir = sodaUserDataDir();
+  const files = [
+    dir ? path.join(dir, 'LunaCacheV2', 'entries.db') : '',
+  ].filter(Boolean);
+  for (const file of files) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const text = fs.readFileSync(file).toString('utf8').toLowerCase();
+      const needles = [`"user_id":${id}`, `"user_id":"${id}"`];
+      for (const needle of needles) {
+        let idx = -1;
+        while ((idx = text.indexOf(needle, idx + 1)) >= 0) {
+          const nearby = text.slice(Math.max(0, idx - 520), Math.min(text.length, idx + 520));
+          const match = nearby.match(/"vip"\s*:\s*"([^"]+)"/i);
+          if (!match) continue;
+          const level = String(match[1] || '').toLowerCase();
+          if (/svip|supervip|super_vip/.test(level)) return 'svip';
+          if (/\bvip\b/.test(level)) return 'vip';
+        }
+      }
+    } catch (e) {}
+  }
+  return '';
+}
+
+function normalizeSodaVip(info, body, cachedVipLevel) {
+  info = info || {};
+  body = body || {};
+  const rawCached = String(cachedVipLevel || '').toLowerCase();
+  const rawStage = String(info.vip_stage || info.vipStage || info.vip_level || info.vipLevel || '').toLowerCase();
+  const rawType = String(info.membership_type || info.membershipType || info.member_type || info.memberType || '').toLowerCase();
+  const vipType = Number(info.vipType || info.vip_type || info.vip || 0) || 0;
+  const vipFlag = info.is_vip === true || info.isVip === true || Number(info.is_vip || info.isVip || 0) > 0 || String(info.is_vip || info.isVip || '').toLowerCase() === 'true';
+  const svipFlag = info.is_svip === true || info.isSvip === true || Number(info.is_svip || info.isSvip || 0) > 0 || String(info.is_svip || info.isSvip || '').toLowerCase() === 'true';
+  const text = collectVipStringValues({ info, body }, [], 0).join(' ').toLowerCase();
+  const isSvip = svipFlag || rawCached === 'svip' || rawStage === 'svip' || rawType === 'svip' || vipType >= 10 || /svip|supervip|super_vip/.test(text);
+  const isVip = isSvip
+    || vipFlag
+    || rawCached === 'vip'
+    || rawStage === 'vip'
+    || rawStage === 'svip'
+    || rawType === 'vip'
+    || rawType === 'svip'
+    || vipType > 0
+    || /\bvip\b|member|membership/.test(text);
+  const vipLevel = isSvip ? 'svip' : (isVip ? 'vip' : 'none');
+  return {
+    vipType: isSvip ? 10 : (isVip ? Math.max(1, vipType) : 0),
+    vipStage: isSvip ? 'svip' : (rawStage || rawType || rawCached || ''),
+    vipLevel,
+    isVip,
+    isSvip,
+    vipLabel: vipLevel === 'svip' ? 'SVIP' : (vipLevel === 'vip' ? 'VIP' : '无VIP'),
+  };
+}
+
+function extractSodaSearchTracks(body, limit) {
+  const groups = Array.isArray(body && body.result_groups) ? body.result_groups : [];
+  const tracksGroup = groups.find(group => String(group && group.id || '').toLowerCase() === 'tracks') || groups[0] || {};
+  const raw = Array.isArray(tracksGroup.data) ? tracksGroup.data : [];
+  const seen = new Set();
+  const songs = [];
+  raw.forEach(item => {
+    const song = mapSodaTrackCandidate(item);
+    const key = song && (song.id || song.name + '|' + song.artist);
+    if (!song || !song.name || !key || seen.has(key)) return;
+    seen.add(key);
+    songs.push(song);
+  });
+  return songs.slice(0, limit || 50);
+}
+
+async function handleSodaSearch(keywords, limit) {
+  const q = String(keywords || '').trim();
+  if (!q) return [];
+  const count = Math.max(4, Math.min(30, Number(limit) || 12));
+  const body = await sodaApiRequest('/luna/pc/search/track', {
+    q,
+    count,
+    offset: 0,
+    search_id: Date.now(),
+  }, { syncCookie: false });
+  return extractSodaSearchTracks(body, count);
+}
+
+async function getSodaLoginInfo(opts) {
+  opts = opts || {};
+  if (opts.sync || (!opts.skipLocalSync && !sodaCookie)) refreshSodaCookieFromClient(!!opts.sync);
+  const now = Date.now();
+  const canUseCache = !opts.sync && sodaLoginInfoCache && sodaLoginInfoCache.cookie === sodaCookie && now - sodaLoginInfoCacheAt < SODA_LOGIN_INFO_CACHE_MS;
+  if (canUseCache) return { ...sodaLoginInfoCache.info };
+  const cookieObj = sodaCookieObject();
+  if (!sodaCookie || !(cookieObj.sessionid || cookieObj.sid_tt || cookieObj.uid_tt)) {
+    const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: !!sodaUserDataDir() };
+    sodaLoginInfoCache = { cookie: sodaCookie, info: emptyInfo };
+    sodaLoginInfoCacheAt = now;
+    return { ...emptyInfo };
+  }
+  try {
+    const body = await sodaApiRequest('/luna/pc/me', {}, { syncCookie: false });
+    const info = body.my_info || body.user || body.data || {};
+    const id = String(info.id || info.user_id || info.uid || '');
+    const cachedVipLevel = readSodaCachedVipLevel(id);
+    const vip = normalizeSodaVip(info, body, cachedVipLevel);
+    const result = {
+      provider: 'soda',
+      loggedIn: !!id,
+      userId: id,
+      nickname: info.nickname || info.name || (id ? ('Soda ' + id) : 'Soda Music'),
+      avatar: sodaImageUrl(info.larger_avatar_url || info.medium_avatar_url || info.avatar || info.avatar_url),
+      ...vip,
+      hasCookie: true,
+      clientDetected: true,
+    };
+    sodaLoginInfoCache = { cookie: sodaCookie, info: result };
+    sodaLoginInfoCacheAt = now;
+    return { ...result };
+  } catch (e) {
+    const errorInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: true, error: e.message };
+    sodaLoginInfoCache = { cookie: sodaCookie, info: errorInfo };
+    sodaLoginInfoCacheAt = now;
+    return { ...errorInfo };
+  }
+}
+
+async function handleSodaUserPlaylists() {
+  const info = await getSodaLoginInfo();
+  if (!info.loggedIn || !info.userId) return { loggedIn: false, provider: 'soda', playlists: [] };
+  const body = await sodaApiRequest('/luna/pc/me/playlist', { count: 200, cursor: 0 });
+  const raw = Array.isArray(body.playlists) ? body.playlists : [];
+  return {
+    loggedIn: true,
+    provider: 'soda',
+    userId: info.userId,
+    playlists: raw.map(mapSodaPlaylist).filter(pl => pl.id && pl.name),
+  };
+}
+
+async function handleSodaPlaylistTracks(id) {
+  const info = await getSodaLoginInfo();
+  if (!info.loggedIn || !info.userId) return { loggedIn: false, provider: 'soda', tracks: [] };
+  const pid = String(id || '').trim();
+  if (!pid) return { loggedIn: true, provider: 'soda', error: 'Missing Soda playlist id', tracks: [] };
+  const body = await sodaApiRequest('/luna/pc/playlist/detail', {
+    playlist_id: pid,
+    count: 500,
+    cursor: 0,
+  });
+  const rawTracks = Array.isArray(body.media_resources) ? body.media_resources : (Array.isArray(body.tracks) ? body.tracks : []);
+  const tracks = rawTracks
+    .map(item => {
+      const entity = item && (item.entity || item.data || item) || {};
+      return mapSodaTrack(entity.track_wrapper || entity.track || entity.track_info || entity.song || entity);
+    })
+    .filter(song => song.id && song.name);
+  const playlist = mapSodaPlaylist(body.playlist || { id: pid });
+  return { loggedIn: true, provider: 'soda', playlist, tracks };
+}
+
+function findSodaMediaUrl(value, depth) {
+  if (!value || depth > 6) return '';
+  if (typeof value === 'string') {
+    if (/^https?:\/\//i.test(value) && /\.(m4a|mp3|flac|aac|ogg|wav)(?:[?#]|$)/i.test(value)) return value;
+    return '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findSodaMediaUrl(item, depth + 1);
+      if (found) return found;
+    }
+    return '';
+  }
+  if (typeof value !== 'object') return '';
+  const priorityKeys = ['play_url', 'playUrl', 'main_url', 'mainUrl', 'url', 'backup_url', 'backupUrl'];
+  for (const key of priorityKeys) {
+    const found = findSodaMediaUrl(value[key], depth + 1);
+    if (found) return found;
+  }
+  for (const key of Object.keys(value)) {
+    const found = findSodaMediaUrl(value[key], depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+function parseSodaJsonMaybe(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try { return JSON.parse(value); } catch (e) { return null; }
+}
+
+function sodaQualityScore(quality, requested) {
+  const q = String(quality || '').toLowerCase();
+  const wanted = String(requested || '').toLowerCase();
+  const rank = {
+    jymaster: 80,
+    master: 78,
+    hires: 70,
+    lossless: 60,
+    sq: 58,
+    exhigh: 45,
+    high: 40,
+    standard: 20,
+    low: 10,
+  };
+  let score = rank[q] || 0;
+  if (wanted && q === wanted) score += 1000;
+  if (wanted === 'jymaster' && /master|jymaster/.test(q)) score += 500;
+  if (wanted === 'hires' && /hi-?res|hires/.test(q)) score += 500;
+  if (wanted === 'lossless' && /lossless|sq/.test(q)) score += 500;
+  return score;
+}
+
+function sodaResolvedQualityLevel(quality, bitrate, fallback) {
+  const q = String(quality || '').toLowerCase();
+  if (/jy|master|母带|臻品|studio/.test(q)) return 'jymaster';
+  if (/hi[-_ ]?res|hires|高解析/.test(q)) return 'hires';
+  if (/lossless|flac|sq|无损/.test(q)) return 'lossless';
+  if (/exhigh|320|hq|高品|极高/.test(q)) return 'exhigh';
+  if (/standard|normal|128|std|标准|aac|m4a/.test(q)) return 'standard';
+  const br = Number(bitrate) || 0;
+  if (br >= 1800000) return 'hires';
+  if (br >= 900000) return 'lossless';
+  if (br >= 256000) return 'exhigh';
+  if (br > 0) return 'standard';
+  return normalizeQualityPreference(fallback || 'hires');
+}
+
+function chooseSodaVideoItem(videoList, qualityPreference) {
+  const list = (Array.isArray(videoList) ? videoList : [])
+    .filter(item => item && (item.main_url || item.mainUrl || item.url || item.MainPlayUrl))
+    .map(item => {
+      const meta = item.video_meta || item.videoMeta || {};
+      const quality = item.Quality || item.quality || meta.quality || '';
+      const bitrate = Number(item.Bitrate || item.bitrate || meta.bitrate || 0) || 0;
+      return { item, quality, bitrate, score: sodaQualityScore(quality, qualityPreference) + Math.min(999, Math.floor(bitrate / 1000)) };
+    })
+    .sort((a, b) => b.score - a.score);
+  return list[0] && list[0].item || null;
+}
+
+function sodaMediaInfoFromItem(item) {
+  if (!item) return null;
+  const meta = item.video_meta || item.videoMeta || {};
+  const encryptInfo = item.encrypt_info || item.encryptInfo || item.EncryptInfo || {};
+  const url = item.main_url || item.mainUrl || item.url || item.MainPlayUrl || item.backup_url || item.backupUrl || item.BackupPlayUrl || '';
+  if (!url) return null;
+  return {
+    url,
+    backupUrl: item.backup_url || item.backupUrl || item.BackupPlayUrl || '',
+    spade: encryptInfo.spade_a || encryptInfo.spadeA || item.PlayAuth || item.playAuth || item.play_auth || '',
+    quality: item.Quality || item.quality || meta.quality || '',
+    bitrate: Number(item.Bitrate || item.bitrate || meta.bitrate || 0) || 0,
+  };
+}
+
+function sodaMediaInfoFromVideoModel(videoModel, qualityPreference) {
+  const model = parseSodaJsonMaybe(videoModel);
+  const videoList = model && (model.video_list || model.videoList || model.VideoList);
+  const item = chooseSodaVideoItem(videoList, qualityPreference);
+  return sodaMediaInfoFromItem(item);
+}
+
+async function sodaMediaInfoFromPlayerInfoUrl(url, qualityPreference) {
+  const target = String(url || '').trim();
+  if (!/^https?:\/\//i.test(target)) return null;
+  const data = await requestJson(target, {
+    headers: {
+      accept: 'application/json',
+      'user-agent': sodaUserAgent(),
+    },
+  });
+  const playInfoList = data && data.Result && data.Result.Data && data.Result.Data.PlayInfoList;
+  const item = chooseSodaVideoItem(playInfoList, qualityPreference);
+  return sodaMediaInfoFromItem(item);
+}
+
+async function resolveSodaMediaInfo(body, qualityPreference) {
+  const player = body && (body.track_player || body.player_info || body.trackPlayer) || {};
+  const direct = sodaMediaInfoFromVideoModel(player.video_model || player.videoModel, qualityPreference);
+  if (direct) return direct;
+  if (player.url_player_info || player.urlPlayerInfo) {
+    try {
+      const fallback = await sodaMediaInfoFromPlayerInfoUrl(player.url_player_info || player.urlPlayerInfo, qualityPreference);
+      if (fallback) return fallback;
+    } catch (e) {}
+  }
+  const fallbackUrl = findSodaMediaUrl(body, 0);
+  return fallbackUrl ? { url: fallbackUrl, backupUrl: '', spade: '', quality: '', bitrate: 0 } : null;
+}
+
+function sodaTrackV2Body(trackId) {
+  return {
+    track_id: String(trackId || ''),
+    media_type: 'track',
+    queue_type: '',
+    enable_refresh_api: true,
+    scene_name: '',
+  };
+}
+
+function normalizeSodaDecryptionKey(value) {
+  if (Buffer.isBuffer(value)) return value.toString('hex');
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('hex');
+  if (Array.isArray(value)) return Buffer.from(value).toString('hex');
+  let text = String(value || '').trim();
+  if (!text) return '';
+  if (/^0x[0-9a-f]+$/i.test(text)) text = text.slice(2);
+  if (/^[0-9a-f]{32,64}$/i.test(text)) return text.toLowerCase();
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && parsed.key) return normalizeSodaDecryptionKey(parsed.key);
+    if (parsed && parsed.decryption_key) return normalizeSodaDecryptionKey(parsed.decryption_key);
+  } catch (e) {}
+  try {
+    const buf = Buffer.from(text, 'base64');
+    if (buf.length === 16 || buf.length === 32) return buf.toString('hex');
+  } catch (e) {}
+  return text;
+}
+
+function decodeSodaSpade(spade) {
+  const raw = String(spade || '').trim();
+  if (!raw) return '';
+  const device = sodaNativeDevice();
+  if (!device) throw new Error('Soda device decoder is unavailable');
+  return normalizeSodaDecryptionKey(device.decodeSpade(raw));
+}
+
+function cleanupSodaPlaybackSessions() {
+  const now = Date.now();
+  for (const [token, item] of sodaPlaybackSessions) {
+    if (!item || now - (item.createdAt || 0) > SODA_PLAYBACK_SESSION_TTL_MS) sodaPlaybackSessions.delete(token);
+  }
+}
+
+function createSodaPlaybackSession(trackId, media, qualityPreference) {
+  cleanupSodaPlaybackSessions();
+  if (!media || !media.url) throw new Error('Missing Soda media URL');
+  if (!media.spade) return null;
+  const decodedKey = decodeSodaSpade(media.spade);
+  if (!decodedKey) throw new Error('Missing Soda decryption key');
+  const token = crypto.randomBytes(18).toString('base64url');
+  sodaPlaybackSessions.set(token, {
+    token,
+    createdAt: Date.now(),
+    trackId: String(trackId || ''),
+    url: media.url,
+    backupUrl: media.backupUrl || '',
+    spade: media.spade,
+    decodedKey,
+    quality: media.quality || normalizeQualityPreference(qualityPreference),
+    bitrate: media.bitrate || 0,
+  });
+  return sodaPlaybackSessions.get(token);
+}
+
+function sodaPlaybackUrlForToken(token) {
+  return '/api/soda/audio?token=' + encodeURIComponent(token);
+}
+
+function ffmpegAvailable() {
+  return !!(ffmpegBinaryPath && fs.existsSync(ffmpegBinaryPath));
+}
+
+function sodaFfmpegHeaderText(sourceUrl) {
+  const headers = audioProxyHeadersFor(sourceUrl, '');
+  if (sodaCookie && !headers.Cookie && !headers.cookie) headers.Cookie = sodaCookie;
+  return Object.keys(headers)
+    .filter(key => headers[key] !== undefined && headers[key] !== null && headers[key] !== '')
+    .map(key => `${key}: ${String(headers[key])}`)
+    .join('\r\n') + '\r\n';
+}
+
+function streamSodaDecodedAudio(req, res, token) {
+  cleanupSodaPlaybackSessions();
+  const session = sodaPlaybackSessions.get(String(token || ''));
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+    res.end('Soda playback session expired');
+    return;
+  }
+  if (!ffmpegAvailable()) {
+    res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+    res.end('FFmpeg is unavailable');
+    return;
+  }
+  const sourceUrl = session.url;
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-nostdin',
+    '-headers', sodaFfmpegHeaderText(sourceUrl),
+    '-decryption_key', session.decodedKey,
+    '-i', sourceUrl,
+    '-vn',
+    '-codec:a', 'libmp3lame',
+    '-b:a', '192k',
+    '-f', 'mp3',
+    'pipe:1',
+  ];
+  let stderr = '';
+  let closed = false;
+  const child = spawn(ffmpegBinaryPath, args, {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  function stopChild() {
+    if (closed) return;
+    closed = true;
+    try { if (!child.killed) child.kill('SIGKILL'); } catch (e) {}
+  }
+  child.stderr.on('data', chunk => {
+    stderr += chunk.toString('utf8');
+    if (stderr.length > 4000) stderr = stderr.slice(-4000);
+  });
+  child.on('error', err => {
+    console.error('[SodaAudio] ffmpeg start failed:', err.message);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+      res.end('Soda audio transcode failed');
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  });
+  child.on('close', code => {
+    closed = true;
+    if (code && code !== 0) console.error('[SodaAudio] ffmpeg exited:', code, stderr.trim());
+    if (!res.writableEnded) res.end();
+  });
+  req.on('close', stopChild);
+  res.on('close', stopChild);
+  res.writeHead(200, {
+    'Content-Type': 'audio/mpeg',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'X-Accel-Buffering': 'no',
+  });
+  child.stdout.pipe(res);
+}
+
+function sodaSignalHasContent(value) {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.some(sodaSignalHasContent);
+  if (typeof value === 'object') return Object.keys(value).some(key => sodaSignalHasContent(value[key]));
+  return String(value).trim() !== '' && String(value).trim() !== '0' && String(value).trim().toLowerCase() !== 'false';
+}
+
+function sodaAccessSignalValue(value, mode) {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.some(item => sodaAccessSignalValue(item, mode));
+  if (typeof value !== 'object') {
+    const text = String(value || '').trim().toLowerCase();
+    return mode !== 'pay'
+      ? !!text && text !== '0' && text !== 'false'
+      : /vip|svip|member|pay|paid|purchase|limited|trial|audition|会员|付费|购买|试听|限免/.test(text);
+  }
+  const text = JSON.stringify(value).toLowerCase();
+  const numericKeys = [
+    'pay_play', 'payplay', 'pay_play_flag', 'pay_type', 'paytype', 'price', 'fee',
+    'vip', 'vip_type', 'viptype', 'need_vip', 'needvip', 'need_pay', 'needpay',
+    'member_type', 'membertype', 'membership_type', 'membershiptype',
+  ];
+  for (const key of numericKeys) {
+    const n = Number(value[key]);
+    if (Number.isFinite(n) && n > 0) return true;
+  }
+  const flagKeys = ['is_vip', 'isVip', 'vipOnly', 'needVip', 'needPay', 'requiresVip', 'paymentRequired'];
+  for (const key of flagKeys) {
+    const flag = parsePlaybackFlag(value[key]);
+    if (flag === true) return true;
+  }
+  if (mode !== 'pay' && sodaSignalHasContent(value)) return true;
+  if (mode === 'pay') {
+    const valueText = Object.keys(value)
+      .map(key => (value[key] && typeof value[key] === 'object') ? '' : String(value[key] || ''))
+      .join(' ')
+      .toLowerCase();
+    return /vip|svip|member|pay_required|paid|purchase|audition|trial|会员|付费|购买|试听|限免/.test(valueText);
+  }
+  return /vip|svip|member|pay_required|paid|purchase|audition|trial|会员|付费|购买|试听|限免/.test(text);
+}
+
+function sodaTrackRequiresAccess(track) {
+  track = track || {};
+  return sodaAccessSignalValue(track.limited_free_info || track.limitedFreeInfo, 'trial')
+    || sodaAccessSignalValue(track.audition_info || track.auditionInfo || track.preview, 'trial')
+    || sodaAccessSignalValue(track.pay_info || track.payInfo, 'pay');
+}
+
+function hasSodaPlaybackTrialSignal(value, depth) {
+  if (!value || depth > 6) return false;
+  if (Array.isArray(value)) return value.some(item => hasSodaPlaybackTrialSignal(item, depth + 1));
+  if (typeof value !== 'object') return false;
+  for (const key of Object.keys(value)) {
+    const lower = key.toLowerCase();
+    if (['pay_info', 'payinfo'].includes(lower)) {
+      if (sodaAccessSignalValue(value[key], 'pay')) return true;
+    }
+    if (['limited_free_info', 'limitedfreeinfo', 'audition_info', 'auditioninfo', 'free_trial_info', 'freetrialinfo', 'trial_info', 'trialinfo'].includes(lower)) {
+      const item = value[key];
+      if (sodaAccessSignalValue(item, 'trial')) return true;
+    }
+  }
+  return Object.keys(value).some(key => hasSodaPlaybackTrialSignal(value[key], depth + 1));
+}
+
+function sodaPlaybackFeeFromBody(body) {
+  const candidates = [
+    body && body.track,
+    body && body.track_info,
+    body && body.track_wrapper,
+    body && body.song,
+    body,
+  ];
+  for (const candidate of candidates) {
+    try {
+      const mapped = mapSodaTrack(candidate);
+      if (mapped && Number(mapped.fee) > 0) return 1;
+    } catch (e) {}
+  }
+  return hasSodaPlaybackTrialSignal(body, 0) ? 1 : 0;
+}
+
+async function handleSodaSongUrl(id, qualityPreference, options) {
+  options = options || {};
+  const trackId = String(id || '').trim();
+  if (!trackId) return { provider: 'soda', url: '', error: 'MISSING_ID', message: 'Missing Soda track id' };
+  let body = {};
+  try {
+    body = await sodaApiRequest('/luna/pc/track_v2', {}, { method: 'POST', body: sodaTrackV2Body(trackId) });
+    const media = await resolveSodaMediaInfo(body, qualityPreference);
+    if (media && media.url) {
+      let playUrl = media.url;
+      let localTranscode = false;
+      let encrypted = !!media.spade;
+      if (encrypted) {
+        const session = createSodaPlaybackSession(trackId, media, qualityPreference);
+        playUrl = sodaPlaybackUrlForToken(session.token);
+        localTranscode = true;
+      }
+      const resolvedLevel = sodaResolvedQualityLevel(media.quality, media.bitrate, qualityPreference);
+      const fee = Math.max(playbackRequestFee(options), sodaPlaybackFeeFromBody(body));
+      let loginInfo = {};
+      if (fee > 0 || options.trialHint || Number(options.previewDuration || 0) > 0) {
+        try { loginInfo = await getSodaLoginInfo({ skipLocalSync: true }); }
+        catch (e) { loginInfo = {}; }
+      }
+      const metadataTrial = shouldMarkPlayableAsTrial('soda', { ...options, songFee: fee }, loginInfo, { fee });
+      const result = {
+        provider: 'soda',
+        url: playUrl,
+        playable: true,
+        trial: metadataTrial,
+        loggedIn: !!loginInfo.loggedIn,
+        vipType: loginInfo.vipType || 0,
+        vipLevel: loginInfo.vipLevel || 'none',
+        isVip: !!loginInfo.isVip,
+        isSvip: !!loginInfo.isSvip,
+        vipLabel: loginInfo.vipLabel || '无VIP',
+        level: resolvedLevel,
+        quality: media.quality ? ('Soda Music ' + media.quality) : 'Soda Music',
+        br: media.bitrate || 0,
+        fee,
+        rawQuality: media.quality || '',
+        maxAvailableQuality: resolvedLevel,
+        availableQualities: qualityLevelsAtOrBelow(resolvedLevel),
+        localTranscode,
+        encrypted,
+      };
+      if (metadataTrial) {
+        result.restriction = playableTrialRestriction('soda', fee, loginInfo, { code: 0 });
+        result.reason = result.restriction.category;
+        result.message = result.restriction.message;
+      }
+      return result;
+    }
+  } catch (e) {
+    body = { status_info: { status_msg: e.message } };
+  }
+  const code = Number(body && body.status_code || 0);
+  const rawMessage = sodaApiErrorMessage(body, '');
+  const restriction = playbackRestriction(
+    'soda',
+    code === 1000062 ? 'client_signature_required' : 'url_unavailable',
+    rawMessage || 'Soda Music requires the official client signature before returning a playback URL.',
+    code === 1000062 ? 'official_client_required' : 'switch_source',
+    { code, rawMessage }
+  );
+  return {
+    provider: 'soda',
+    url: '',
+    playable: false,
+    error: 'SODA_URL_UNAVAILABLE',
+    restriction,
+    reason: restriction.category,
+    message: restriction.message,
+    sodaCode: code,
+    rawMessage,
+    requestedQuality: normalizeQualityPreference(qualityPreference),
+  };
+}
+
+async function handleSodaLyric(id) {
+  const trackId = String(id || '').trim();
+  if (!trackId) return { provider: 'soda', error: 'Missing Soda track id', lyric: '' };
+  try {
+    const body = await sodaApiRequest('/luna/pc/track_v2', {}, { method: 'POST', body: sodaTrackV2Body(trackId) });
+    const parts = extractSodaLyricParts(body);
+    const hasLyric = !!(parts.lyric || parts.yrc || parts.tlyric);
+    return {
+      provider: 'soda',
+      id: trackId,
+      lyric: parts.lyric || '',
+      tlyric: parts.tlyric || '',
+      yrc: parts.yrc || '',
+      source: hasLyric ? ('soda-' + (parts.format || 'lyric')) : 'soda-empty',
+      sourcePath: parts.sourcePath || '',
+    };
+  } catch (e) {
+    return { provider: 'soda', id: trackId, lyric: '', tlyric: '', yrc: '', source: 'soda-empty', error: e.message };
+  }
+}
+
+async function handleSodaDiscoverHome() {
+  const info = await getSodaLoginInfo();
+  const loggedIn = !!(info && info.loggedIn);
+  if (!loggedIn) {
+    return {
+      provider: 'soda',
+      loggedIn: false,
+      user: null,
+      dailySongs: [],
+      playlists: [],
+      podcasts: [],
+      radarSongs: [],
+      newSongs: [],
+      recommendationSongs: [],
+      mode: 'starter',
+      updatedAt: Date.now(),
+    };
+  }
+  let playlists = [];
+  let dailySongs = [];
+  let newSongs = [];
+  try {
+    const listResult = await handleSodaUserPlaylists();
+    playlists = (listResult.playlists || []).slice(0, 12);
+    const favorite = playlists[0] || null;
+    if (favorite && favorite.id) {
+      const tracksResult = await handleSodaPlaylistTracks(favorite.id);
+      dailySongs = (tracksResult.tracks || []).slice(0, 30);
+    }
+    try { newSongs = await handleSodaSearch('\u65b0\u6b4c', 24); }
+    catch (e) { newSongs = []; }
+  } catch (e) {
+    console.warn('[SodaDiscoverHome]', e && e.message || e);
+  }
+  const radarSongs = shuffledSample(mergeDiscoverLists([dailySongs, newSongs], 60), 30);
+  return {
+    provider: 'soda',
+    loggedIn,
+    user: { userId: info.userId, nickname: info.nickname || '', avatar: info.avatar || '' },
+    dailySongs: dailySongs.length ? dailySongs : newSongs.slice(0, 20),
+    playlists,
+    podcasts: [],
+    radarSongs,
+    newSongs,
+    heartSongs: radarSongs,
+    similarSongs: newSongs,
+    recommendationSongs: shuffledSample(mergeDiscoverLists([dailySongs, newSongs, radarSongs], 40), 5),
+    mode: 'member',
+    updatedAt: Date.now(),
+  };
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -2715,22 +4180,31 @@ function normalizeQQProfile(body, cookieObj) {
   const uin = qqCookieUin(cookieObj);
   const data = (body && (body.data || body.profile || body.creator || body.result)) || {};
   const creator = (data.creator || data.user || data.profile || data) || {};
-  const vipInfo = data.vipInfo || data.vipinfo || data.vip || creator.vipInfo || creator.vipinfo || {};
+  const vipInfo = data.vipInfo || data.vipinfo || data.vip || data.vip_info || creator.vipInfo || creator.vipinfo || creator.vip_info || {};
   const profileNick = creator.nick || creator.nickname || creator.name || creator.hostname || creator.title || '';
   const profileAvatar = creator.headpic || creator.avatar || creator.avatarUrl || creator.logo || '';
   const cookieNick = qqCookieNickname(cookieObj, uin);
   const nick = profileNick || cookieNick || '';
   const avatar = profileAvatar || qqCookieAvatar(cookieObj, uin);
-  let vipType = Number(
-    cookieObj.vipType || cookieObj.vip_type ||
-    data.vipType || data.vip_type || data.viptype || data.music_vip_level || data.green_vip_level || data.luxury_vip_level ||
-    creator.vipType || creator.vip_type || creator.music_vip_level || creator.green_vip_level || creator.luxury_vip_level ||
-    vipInfo.vipType || vipInfo.vip_type || vipInfo.music_vip_level || vipInfo.green_vip_level || vipInfo.luxury_vip_level || 0
-  ) || 0;
-  if (!vipType) {
-    const vipFlag = data.isVip || data.is_vip || data.vipFlag || data.vipflag || creator.isVip || creator.is_vip || vipInfo.isVip || vipInfo.is_vip || vipInfo.vipFlag;
-    if (vipFlag === true || Number(vipFlag) > 0 || String(vipFlag || '').toLowerCase() === 'true') vipType = 1;
-  }
+  const objects = [cookieObj, data, creator, vipInfo];
+  let vipType = firstPositiveNumberFrom(objects, [
+    'vipType', 'vip_type', 'viptype', 'musicVipLevel', 'music_vip_level',
+    'greenVipLevel', 'green_vip_level', 'green_vip_level',
+    'luxuryVipLevel', 'luxury_vip_level', 'superVipLevel', 'super_vip_level',
+    'svipType', 'svip_type', 'memberType', 'member_type', 'membershipType', 'membership_type',
+  ]);
+  const text = collectVipStringValues({ cookieObj, data, creator, vipInfo }, [], 0).join(' ').toLowerCase();
+  const svipFlag = objects.some(obj => obj && (
+    obj.isSvip === true || obj.is_svip === true || obj.svip === true ||
+    Number(obj.isSvip || obj.is_svip || obj.svip || obj.svipType || obj.svip_type || obj.luxury_vip_level || 0) > 0
+  )) || /svip|supervip|super_vip|luxury|豪华绿钻|超级会员/.test(text);
+  const vipFlag = objects.some(obj => obj && (
+    obj.isVip === true || obj.is_vip === true || obj.vip === true ||
+    Number(obj.isVip || obj.is_vip || obj.vip || obj.vipFlag || obj.vipflag || obj.green_vip_level || obj.music_vip_level || 0) > 0
+  )) || /vip|绿钻|会员/.test(text);
+  const isSvip = svipFlag || vipType >= 10;
+  const isVip = isSvip || vipFlag || vipType > 0;
+  const vipLevel = isSvip ? 'svip' : (isVip ? 'vip' : 'none');
   return {
     provider: 'qq',
     loggedIn: !!(uin && qqCookieMusicKey(cookieObj)),
@@ -2738,7 +4212,11 @@ function normalizeQQProfile(body, cookieObj) {
     userId: uin,
     nickname: nick || (uin ? ('QQ ' + uin) : 'QQ 音乐'),
     avatar,
-    vipType,
+    vipType: isSvip ? Math.max(10, vipType) : (isVip ? Math.max(1, vipType) : 0),
+    vipLevel,
+    isVip,
+    isSvip,
+    vipLabel: vipLevel === 'svip' ? 'SVIP' : (vipLevel === 'vip' ? 'VIP' : '无VIP'),
     hasCookie: !!qqCookie,
     playbackKeyReady: !!qqCookiePlaybackKey(cookieObj),
     profileSource: profileNick || profileAvatar ? 'qq-profile' : (cookieNick || avatar ? 'cookie' : 'fallback'),
@@ -2749,7 +4227,7 @@ async function getQQLoginInfo() {
   const cookieObj = qqCookieObject();
   const uin = qqCookieUin(cookieObj);
   const musicKey = qqCookieMusicKey(cookieObj);
-  if (!uin || !musicKey) return { provider: 'qq', loggedIn: false, hasCookie: !!qqCookie };
+  if (!uin || !musicKey) return { provider: 'qq', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!qqCookie };
   const fallback = normalizeQQProfile(null, cookieObj);
   try {
     const u = new URL('https://c.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg');
@@ -2793,10 +4271,13 @@ async function qqGetJSON(targetUrl, params, opts) {
 }
 
 function audioProxyHeadersFor(audioUrl, range) {
-  const headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
+  let headers = { 'User-Agent': UA, Referer: 'https://music.163.com/' };
   try {
     const host = new URL(audioUrl).hostname.toLowerCase();
     if (host.includes('qq.com') || host.includes('qpic.cn')) headers.Referer = 'https://y.qq.com/';
+    if (host.includes('douyinvod.com') || host.includes('bytevod.com') || host.includes('qishui.com')) {
+      headers = { 'User-Agent': sodaUserAgent() };
+    }
   } catch (e) {}
   if (range) headers.Range = range;
   return headers;
@@ -2979,6 +4460,39 @@ function mapQQSmartSong(item) {
   };
 }
 
+function decodeQQActionSwitch(track) {
+  track = track || {};
+  const action = track.action || {};
+  const rawSwitch = Number(action.switch || action.switches || track.switch || 0) || 0;
+  const bits = rawSwitch ? rawSwitch.toString(2).split('') : [];
+  bits.pop();
+  bits.reverse();
+  const names = ['play_lq', 'play_hq', 'play_sq', 'down_lq', 'down_hq', 'down_sq', 'soso', 'fav', 'share', 'bgm', 'ring', 'sing', 'radio', 'try', 'give', 'poster', 'play_5_1', 'down_5_1', 'bullet', 'cache_lq', 'cache_hq', 'cache_sq', 'cache_dts', 'track_pay'];
+  const out = {};
+  names.forEach((name, idx) => { out[name] = Number(bits[idx] || 0) || 0; });
+  out.play = out.play_lq || out.play_hq || out.play_sq || out.play_5_1 ? 1 : 0;
+  return out;
+}
+
+function qqTrackTrialInfo(track) {
+  track = track || {};
+  const file = track.file || {};
+  const action = decodeQQActionSwitch(track);
+  const sizeTry = Number(file.size_try || file.sizeTry || 0) || 0;
+  const tryBegin = Number(file.try_begin || file.tryBegin || file.b_30s || 0) || 0;
+  const tryEnd = Number(file.try_end || file.tryEnd || file.e_30s || 0) || 0;
+  const duration = tryEnd > tryBegin ? tryEnd - tryBegin : (Number(file.e_30s || 0) > Number(file.b_30s || 0) ? Number(file.e_30s || 0) - Number(file.b_30s || 0) : 0);
+  const trialMid = Array.isArray(track.vs) && track.vs[0] ? track.vs[0] : (file.media_mid || '');
+  return {
+    hasTrial: sizeTry > 0 || (action.try && duration > 0),
+    trialMid,
+    previewStart: tryBegin,
+    previewDuration: duration,
+    sizeTry,
+    action,
+  };
+}
+
 function mapQQTrack(track, fallback) {
   track = track || {};
   fallback = fallback || {};
@@ -2986,6 +4500,8 @@ function mapQQTrack(track, fallback) {
   const artists = mapQQArtists(track.singer || []);
   const mid = track.mid || fallback.mid || fallback.songmid || '';
   const albumMid = album.mid || album.pmid || '';
+  const trial = qqTrackTrialInfo(track);
+  const playable = !!(trial.action.play || trial.hasTrial || fallback.playable);
   return {
     provider: 'qq',
     source: 'qq',
@@ -2995,6 +4511,7 @@ function mapQQTrack(track, fallback) {
     mid,
     songmid: mid,
     mediaMid: track.file && track.file.media_mid,
+    trialMid: trial.trialMid,
     name: track.name || track.title || fallback.name || '',
     artist: artists.map(a => a.name).join(' / ') || fallback.artist || '',
     artists: artists.length ? artists : (fallback.artists || []),
@@ -3005,7 +4522,10 @@ function mapQQTrack(track, fallback) {
     cover: qqAlbumCover(albumMid, 300) || fallback.cover || '',
     duration: (Number(track.interval) || 0) * 1000,
     fee: track.pay && Number(track.pay.pay_play) ? 1 : 0,
-    playable: false,
+    playable,
+    trialHint: trial.hasTrial,
+    previewStart: trial.previewStart,
+    previewDuration: trial.previewDuration,
   };
 }
 
@@ -3027,8 +4547,8 @@ async function qqSmartboxSearch(keywords, limit) {
   return (Array.isArray(items) ? items : []).slice(0, Math.max(1, Math.min(limit || 6, 10))).map(mapQQSmartSong);
 }
 
-async function qqSongDetail(mid, fallback) {
-  if (!mid) return fallback;
+async function qqSongRawDetail(mid) {
+  if (!mid) return null;
   const json = await qqMusicRequest({
     comm: { ct: 24, cv: 0 },
     songinfo: {
@@ -3038,7 +4558,13 @@ async function qqSongDetail(mid, fallback) {
     },
   });
   const data = json && json.songinfo && json.songinfo.data;
-  return mapQQTrack(data && data.track_info, fallback);
+  return data && data.track_info || null;
+}
+
+async function qqSongDetail(mid, fallback) {
+  if (!mid) return fallback;
+  const track = await qqSongRawDetail(mid);
+  return mapQQTrack(track, fallback);
 }
 
 async function handleQQArtistDetail(mid, limit) {
@@ -3222,7 +4748,8 @@ async function qqArtistRoamSongs(seedSongs, limit) {
   return artistName ? qqSearchSongPool([artistName], count) : [];
 }
 
-async function handleQQSongUrl(mid, mediaMid, qualityPreference) {
+async function handleQQSongUrl(mid, mediaMid, qualityPreference, options) {
+  options = options || {};
   const songmid = String(mid || '').trim();
   if (!songmid) return { provider: 'qq', url: '', error: 'MISSING_MID', message: 'Missing QQ song mid' };
   const guid = String(10000000 + Math.floor(Math.random() * 90000000));
@@ -3232,9 +4759,17 @@ async function handleQQSongUrl(mid, mediaMid, qualityPreference) {
   const playbackKey = qqCookiePlaybackKey(cookieObj);
   const fileMediaMid = String(mediaMid || '').trim();
   const requestedQuality = normalizeQualityPreference(qualityPreference);
+  let detailTrack = null;
+  if (!fileMediaMid || options.qqTrialMid || options.trialHint || playbackRequestFee(options) > 0 || Number(options.previewDuration || 0) > 0) {
+    try { detailTrack = await qqSongRawDetail(songmid); }
+    catch (e) { detailTrack = null; }
+  }
+  const detailTrial = qqTrackTrialInfo(detailTrack || {});
   const mediaIds = [];
-  if (fileMediaMid) mediaIds.push(fileMediaMid);
-  if (songmid && !mediaIds.includes(songmid)) mediaIds.push(songmid);
+  [fileMediaMid, options.qqTrialMid, detailTrack && detailTrack.file && detailTrack.file.media_mid, detailTrial.trialMid, songmid].forEach(mediaId => {
+    mediaId = String(mediaId || '').trim();
+    if (mediaId && !mediaIds.includes(mediaId)) mediaIds.push(mediaId);
+  });
   const fileCandidates = mediaIds.flatMap(mediaId =>
     qualityCandidatesFrom(requestedQuality, QQ_QUALITY_CANDIDATE_TEMPLATES)
       .map(item => ({ ...item, mediaId, filename: item.prefix + mediaId + item.ext }))
@@ -3266,20 +4801,59 @@ async function handleQQSongUrl(mid, mediaMid, qualityPreference) {
   if (purl) {
     const sip = (data.sip && data.sip[0]) || 'https://ws.stream.qqmusic.qq.com/';
     const fileMeta = fileCandidates.find(item => item.filename === info.filename) || {};
-    return {
+    let loginInfo = null;
+    if (fileMeta.trial || options.trialHint || playbackRequestFee(options) > 0) {
+      try { loginInfo = await getQQLoginInfo(); }
+      catch (e) { loginInfo = {}; }
+    }
+    const metadataTrial = shouldMarkPlayableAsTrial('qq', options, loginInfo || {}, { fee: playbackRequestFee(options) });
+    const isTrial = !!fileMeta.trial || metadataTrial;
+    const fee = playbackRequestFee(options);
+    const result = {
       provider: 'qq',
       url: sip + purl,
-      trial: false,
+      trial: isTrial,
       playable: true,
+      loggedIn: loginInfo ? !!loginInfo.loggedIn : !!(uin && musicKey),
+      vipType: loginInfo && loginInfo.vipType || 0,
+      vipLevel: loginInfo && loginInfo.vipLevel || 'none',
+      isVip: !!(loginInfo && loginInfo.isVip),
+      isSvip: !!(loginInfo && loginInfo.isSvip),
+      vipLabel: loginInfo && loginInfo.vipLabel || '无VIP',
       level: fileMeta.level || info.filename || '',
       quality: fileMeta.label || info.filename || '',
+      br: fileMeta.br || 0,
+      maxAvailableQuality: fileMeta.level || '',
+      availableQualities: qualityLevelsAtOrBelow(fileMeta.level || 'standard'),
       filename: info.filename || '',
+      fee,
+      trialMid: detailTrial.trialMid || '',
+      previewStart: detailTrial.previewStart || 0,
+      previewDuration: detailTrial.previewDuration || Number(options.previewDuration || 0) || 0,
+      trialSize: detailTrial.sizeTry || 0,
       requestedQuality,
     };
+    if (isTrial) {
+      result.restriction = metadataTrial
+        ? playableTrialRestriction('qq', fee, loginInfo || {}, { code: info.result || 0 })
+        : playbackRestriction('qq', 'trial_only', 'QQ 音乐仅返回试听片段，完整播放需要会员、购买或更高权限', 'upgrade', { code: info.result || 0, fee });
+      result.reason = result.restriction.category;
+      result.message = result.restriction.message;
+    }
+    return result;
   }
+  let failedSongMeta = {};
+  let failedLoginInfo = {};
+  try { failedSongMeta = detailTrack ? mapQQTrack(detailTrack, { mid: songmid, mediaMid: fileMediaMid }) : await qqSongDetail(songmid, { mid: songmid, mediaMid: fileMediaMid }); }
+  catch (e) { failedSongMeta = {}; }
+  try { failedLoginInfo = await getQQLoginInfo(); }
+  catch (e) { failedLoginInfo = {}; }
   const restriction = classifyQQPlaybackRestriction(info, {
     hasSession: !!(uin && musicKey),
     hasPlaybackKey: !!(uin && playbackKey),
+    songFee: playbackRequestFee(options, failedSongMeta),
+    hasTrial: !!(failedSongMeta && (failedSongMeta.trialHint || Number(failedSongMeta.previewDuration || 0) > 0)),
+    hasVip: !!(failedLoginInfo && (failedLoginInfo.isVip || failedLoginInfo.isSvip || Number(failedLoginInfo.vipType || 0) > 0)),
   });
   return {
     provider: 'qq',
@@ -3291,8 +4865,13 @@ async function handleQQSongUrl(mid, mediaMid, qualityPreference) {
     restriction,
     reason: restriction.category,
     message: restriction.message,
+    fee: playbackRequestFee(options, failedSongMeta),
     qqCode: info && (info.result || info.code || info.errtype),
     rawMessage: info && (info.msg || info.tips || info.errmsg || ''),
+    trialHint: !!(failedSongMeta && failedSongMeta.trialHint),
+    trialMid: failedSongMeta && failedSongMeta.trialMid || detailTrial.trialMid || '',
+    previewStart: failedSongMeta && failedSongMeta.previewStart || detailTrial.previewStart || 0,
+    previewDuration: failedSongMeta && failedSongMeta.previewDuration || detailTrial.previewDuration || 0,
     tried: fileCandidates.map(item => item.label + ' · ' + item.filename),
     requestedQuality,
   };
@@ -3771,7 +5350,8 @@ async function fetchMyPodcastItems(key, info, limit, offset) {
 // ---------- 业务: 取歌曲URL (探测试听) ----------
 //   返回 { url, trial, level, br }
 //   trial=true 表示这是试听片段 (freeTrialInfo 非空)
-async function handleSongUrl(id, loginInfo, qualityPreference) {
+async function handleSongUrl(id, loginInfo, qualityPreference, options) {
+  options = options || {};
   console.log('[SongUrl] id:', id, 'logged-in:', !!userCookie);
   const requestedQuality = normalizeQualityPreference(qualityPreference);
   const svipReady = hasNeteaseSvip(loginInfo);
@@ -3795,21 +5375,43 @@ async function handleSongUrl(id, loginInfo, qualityPreference) {
       if (d) lastData = d;
       const url = d && d.url;
       const freeTrial = d && d.freeTrialInfo;
+      const fee = playbackRequestFee(options, d);
+      const metadataTrial = shouldMarkPlayableAsTrial('netease', options, loginInfo, d);
+      const resolvedLevel = resolvedQualityFromLevelAndBitrate(q.level, d && d.br, [d && d.level, d && d.type, d && d.encodeType, d && d.format].filter(Boolean).join(' '));
       console.log('[SongUrl]', q.level, '->', url ? 'OK' : 'no url', freeTrial ? '(TRIAL)' : '');
-      if (url && !freeTrial) {
-        return { url, trial: false, playable: true, level: q.level, quality: q.label, br: d.br, requestedQuality };
+      if (url && !freeTrial && !metadataTrial) {
+        return {
+          url,
+          trial: false,
+          playable: true,
+          level: resolvedLevel,
+          quality: q.label,
+          br: d.br,
+          fee,
+          requestedQuality,
+          maxAvailableQuality: resolvedLevel,
+          availableQualities: qualityLevelsAtOrBelow(resolvedLevel),
+        };
       }
-      if (url && freeTrial && !trialFallback) {
+      if (url && (freeTrial || metadataTrial) && !trialFallback) {
+        const restriction = freeTrial
+          ? classifyNeteasePlaybackRestriction(d, loginInfo)
+          : playableTrialRestriction('netease', fee, loginInfo, { code: d && d.code });
         trialFallback = {
           url,
           trial: true,
           playable: true,
-          level: q.level,
+          level: resolvedLevel,
           quality: q.label,
           br: d.br,
+          fee,
           requestedQuality,
+          maxAvailableQuality: resolvedLevel,
+          availableQualities: qualityLevelsAtOrBelow(resolvedLevel),
           trialInfo: freeTrial,
-          restriction: classifyNeteasePlaybackRestriction(d, loginInfo),
+          restriction,
+          reason: restriction.category,
+          message: restriction.message,
         };
       }
     } catch (err) {
@@ -3818,7 +5420,7 @@ async function handleSongUrl(id, loginInfo, qualityPreference) {
     }
   }
   if (trialFallback) return trialFallback;
-  const restriction = classifyNeteasePlaybackRestriction(lastData, loginInfo);
+  const restriction = classifyNeteasePlaybackRestriction(lastData || { fee: playbackRequestFee(options) }, loginInfo);
   return {
     url: null,
     trial: false,
@@ -3827,7 +5429,7 @@ async function handleSongUrl(id, loginInfo, qualityPreference) {
     message: restriction.message,
     restriction,
     lastCode: lastData && lastData.code,
-    fee: lastData && lastData.fee,
+    fee: playbackRequestFee(options, lastData),
     error: lastError && lastError.message,
     requestedQuality,
   };
@@ -3848,12 +5450,31 @@ function readCookieFromResponse(resp) {
   return '';
 }
 function firstPositiveNumberFrom(objects, keys) {
-  for (const obj of objects) {
-    if (!obj || typeof obj !== 'object') continue;
-    for (const key of keys) {
-      const value = Number(obj[key]);
-      if (Number.isFinite(value) && value > 0) return value;
+  const keySet = new Set(keys || []);
+  function visit(obj, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return 0;
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const found = visit(item, depth + 1);
+        if (found) return found;
+      }
+      return 0;
     }
+    for (const key of Object.keys(obj)) {
+      if (keySet.has(key)) {
+        const value = Number(obj[key]);
+        if (Number.isFinite(value) && value > 0) return value;
+      }
+    }
+    for (const key of Object.keys(obj)) {
+      const found = visit(obj[key], depth + 1);
+      if (found) return found;
+    }
+    return 0;
+  }
+  for (const obj of objects) {
+    const found = visit(obj, 0);
+    if (found) return found;
   }
   return 0;
 }
@@ -3889,19 +5510,107 @@ function collectVipStringValues(value, out, depth) {
   });
   return out;
 }
+function firstPositiveNumberDirect(obj, keys) {
+  if (!obj || typeof obj !== 'object') return 0;
+  for (const key of keys || []) {
+    const value = Number(obj[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+function explicitTruthy(value) {
+  if (value === true || value === 1 || value === '1') return true;
+  if (typeof value === 'string') return value.trim().toLowerCase() === 'true';
+  return false;
+}
+function normalizeExpireTimeMs(value) {
+  const time = Number(value || 0);
+  if (!Number.isFinite(time) || time <= 0) return 0;
+  return time < 100000000000 ? time * 1000 : time;
+}
+function readNeteaseVipExpiresAt(obj) {
+  if (!obj || typeof obj !== 'object') return 0;
+  return Math.max(
+    normalizeExpireTimeMs(obj.expireTime),
+    normalizeExpireTimeMs(obj.expire_time),
+    normalizeExpireTimeMs(obj.expireAt),
+    normalizeExpireTimeMs(obj.expire_at),
+    normalizeExpireTimeMs(obj.endTime),
+    normalizeExpireTimeMs(obj.end_time),
+    normalizeExpireTimeMs(obj.validTime),
+    normalizeExpireTimeMs(obj.valid_time),
+    normalizeExpireTimeMs(obj.vipExpireTime),
+    normalizeExpireTimeMs(obj.vip_expire_time)
+  );
+}
+function collectActiveNeteaseVipPackages(value, pathParts, out, depth, now) {
+  if (!value || typeof value !== 'object' || depth > 7) return out;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectActiveNeteaseVipPackages(item, pathParts.concat(String(index)), out, depth + 1, now));
+    return out;
+  }
+  const expiresAt = readNeteaseVipExpiresAt(value);
+  const level = firstPositiveNumberDirect(value, [
+    'vipLevel', 'vip_level', 'vipCode', 'vip_code', 'vipType', 'vip_type',
+    'level', 'type', 'redVipLevel', 'red_vip_level', 'musicVipLevel',
+    'music_vip_level', 'blackVipLevel', 'black_vip_level', 'svipType',
+    'svip_type',
+  ]);
+  if (expiresAt > now && level > 0) {
+    out.push({ path: pathParts.join('.'), expiresAt, level });
+  }
+  Object.keys(value).forEach(key => {
+    collectActiveNeteaseVipPackages(value[key], pathParts.concat(key), out, depth + 1, now);
+  });
+  return out;
+}
+function emptyNeteaseVip(extra) {
+  extra = extra || {};
+  return {
+    vipType: 0,
+    vipLevel: 'none',
+    isVip: false,
+    isSvip: false,
+    vipLabel: '无VIP',
+    vipExpiresAt: 0,
+    vipCheckedAt: extra.vipCheckedAt || Date.now(),
+    vipSource: extra.vipSource || 'netease',
+  };
+}
+function normalizeNeteaseVipPayloads(payloads) {
+  const now = Date.now();
+  const active = collectActiveNeteaseVipPackages(payloads, ['vipPayloads'], [], 0, now);
+  if (!active.length) return emptyNeteaseVip({ vipCheckedAt: now, vipSource: 'netease-vip-api' });
+  const isSvip = active.some(item => /svip|super|redplus|luxury/i.test(item.path));
+  const expiresAt = Math.max(...active.map(item => item.expiresAt));
+  return {
+    vipType: isSvip ? 10 : 1,
+    vipLevel: isSvip ? 'svip' : 'vip',
+    isVip: true,
+    isSvip,
+    vipLabel: isSvip ? 'SVIP' : 'VIP',
+    vipExpiresAt: expiresAt,
+    vipCheckedAt: now,
+    vipSource: 'netease-vip-api',
+  };
+}
 function normalizeNeteaseVip(profile, account, extra) {
   profile = profile || {};
   account = account || {};
   extra = extra || {};
+  if (Array.isArray(extra.vipPayloads)) {
+    return normalizeNeteaseVipPayloads(extra.vipPayloads);
+  }
   const vipInfo = profile.vipInfo || profile.vipinfo || account.vipInfo || account.vipinfo || extra.vipInfo || extra.vipinfo || {};
   const objects = [account, profile, vipInfo, extra];
   const vipType = firstPositiveNumberFrom(objects, [
     'vipType', 'vip_type', 'viptype', 'musicVipType', 'music_vip_type',
-    'musicVipLevel', 'music_vip_level', 'redVipLevel', 'red_vip_level',
-    'blackVipLevel', 'black_vip_level', 'luxuryVipLevel', 'luxury_vip_level',
-    'svipType', 'svip_type',
+    'musicVipLevel', 'music_vip_level', 'blackVipLevel', 'black_vip_level',
+    'luxuryVipLevel', 'luxury_vip_level',
+    'svipType', 'svip_type', 'vipCode', 'vip_code', 'associatorVipCode', 'associator_vip_code',
+    'memberType', 'member_type', 'membershipType', 'membership_type',
   ]);
-  const text = collectVipStringValues({ account, profile, vipInfo, extra }, [], 0).join(' ').toLowerCase();
+  const text = '';
   const svipFlag = objects.some(obj => obj && (
     obj.isSvip === true || obj.is_svip === true || obj.svip === true ||
     Number(obj.isSvip || obj.is_svip || obj.svip || obj.svipType || obj.svip_type || 0) > 0
@@ -3935,6 +5644,26 @@ function normalizeLoginInfo(profile, account, extra) {
     ...vip,
   };
 }
+async function enrichNeteaseLoginVip(info) {
+  if (!info || !info.loggedIn || !info.userId) return info;
+  const tasks = [];
+  if (typeof vip_info_v2 === 'function') tasks.push(vip_info_v2({ uid: info.userId, cookie: userCookie, timestamp: Date.now() }));
+  if (typeof vip_info === 'function') tasks.push(vip_info({ uid: info.userId, cookie: userCookie, timestamp: Date.now() }));
+  if (!tasks.length) return info;
+  try {
+    const results = await Promise.allSettled(tasks);
+    const vipPayloads = results
+      .filter(item => item.status === 'fulfilled' && item.value)
+      .map(item => item.value.body || item.value)
+      .filter(Boolean);
+    if (!vipPayloads.length) return info;
+    const vip = normalizeNeteaseVip({}, {}, { vipPayloads });
+    return { ...info, ...vip };
+  } catch (e) {
+    console.warn('[Login] vip info failed:', e.message);
+    return info;
+  }
+}
 function isNeteaseAuthInvalidPayload(payload) {
   const code = normalizeApiCode(payload);
   if (code === 301 || code === 401) return true;
@@ -3950,7 +5679,7 @@ async function getLoginInfo() {
     const body = st.body || {};
     const data = body.data || body;
     const info = normalizeLoginInfo(data.profile || body.profile, data.account || body.account, data);
-    if (info.loggedIn) return info;
+    if (info.loggedIn) return await enrichNeteaseLoginVip(info);
   } catch (e) {
     console.warn('[Login] login_status failed:', e.message);
   }
@@ -3959,7 +5688,7 @@ async function getLoginInfo() {
     const acc = await user_account({ cookie: userCookie, timestamp: Date.now() });
     const body = acc.body || {};
     const info = normalizeLoginInfo(body.profile, body.account, body);
-    if (info.loggedIn) return info;
+    if (info.loggedIn) return await enrichNeteaseLoginVip(info);
     if (isNeteaseAuthInvalidPayload(acc)) saveCookie('');
     return { loggedIn: false, hasCookie: !!userCookie, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP' };
   } catch (e) {
@@ -4186,7 +5915,7 @@ const server = http.createServer(async (req, res) => {
       const mid = url.searchParams.get('mid') || url.searchParams.get('id') || '';
       const mediaMid = url.searchParams.get('mediaMid') || url.searchParams.get('media_mid') || '';
       const quality = url.searchParams.get('quality') || '';
-      const info = await handleQQSongUrl(mid, mediaMid, quality);
+      const info = await handleQQSongUrl(mid, mediaMid, quality, playbackRequestOptionsFromSearchParams(url.searchParams));
       sendJSON(res, info);
     } catch (err) {
       console.error('[QQSongUrl]', err);
@@ -4216,7 +5945,7 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, info);
     } catch (err) {
       console.error('[QQLoginStatus]', err);
-      sendJSON(res, { provider: 'qq', loggedIn: false, error: err.message }, 500);
+      sendJSON(res, { provider: 'qq', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', error: err.message }, 500);
     }
     return;
   }
@@ -4243,7 +5972,7 @@ const server = http.createServer(async (req, res) => {
 
   if (pn === '/api/qq/logout') {
     saveQQCookie('');
-    sendJSON(res, { provider: 'qq', ok: true, loggedIn: false });
+    sendJSON(res, { provider: 'qq', ok: true, loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP' });
     return;
   }
 
@@ -4266,6 +5995,106 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[QQPlaylistTracks]', err);
       sendJSON(res, { provider: 'qq', error: err.message, tracks: [] }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/search') {
+    try {
+      const kw = url.searchParams.get('keywords') || '';
+      const limit = Math.max(4, Math.min(18, parseInt(url.searchParams.get('limit') || '10', 10) || 10));
+      const songs = await handleSodaSearch(kw, limit);
+      sendJSON(res, { provider: 'soda', songs });
+    } catch (err) {
+      console.error('[SodaSearch]', err);
+      sendJSON(res, { provider: 'soda', error: err.message, songs: [] }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/song/url') {
+    try {
+      const id = url.searchParams.get('id') || url.searchParams.get('trackId') || url.searchParams.get('sodaId') || '';
+      const quality = url.searchParams.get('quality') || '';
+      const info = await handleSodaSongUrl(id, quality, playbackRequestOptionsFromSearchParams(url.searchParams));
+      sendJSON(res, info);
+    } catch (err) {
+      console.error('[SodaSongUrl]', err);
+      sendJSON(res, { provider: 'soda', url: '', playable: false, error: err.message }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/audio') {
+    try {
+      streamSodaDecodedAudio(req, res, url.searchParams.get('token') || '');
+    } catch (err) {
+      console.error('[SodaAudio]', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+        res.end(err.message || 'Soda audio failed');
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/lyric') {
+    try {
+      const id = url.searchParams.get('id') || url.searchParams.get('trackId') || url.searchParams.get('sodaId') || '';
+      if (!id) { sendJSON(res, { provider: 'soda', error: 'Missing Soda track id', lyric: '' }, 400); return; }
+      const data = await handleSodaLyric(id);
+      sendJSON(res, data);
+    } catch (err) {
+      console.error('[SodaLyric]', err);
+      sendJSON(res, { provider: 'soda', error: err.message, lyric: '' }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/login/status') {
+    try {
+      const sync = url.searchParams.get('sync') === '1' || url.searchParams.get('sync') === 'true';
+      const quick = url.searchParams.get('quick') === '1' || url.searchParams.get('quick') === 'true';
+      if (sync) sodaAutoSyncEnabled = true;
+      const info = await getSodaLoginInfo({ sync, skipLocalSync: quick });
+      sendJSON(res, info);
+    } catch (err) {
+      console.error('[SodaLoginStatus]', err);
+      sendJSON(res, { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', error: err.message }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/logout') {
+    sodaAutoSyncEnabled = false;
+    saveSodaCookie('');
+    sodaLoginInfoCache = null;
+    sodaLoginInfoCacheAt = 0;
+    sendJSON(res, { provider: 'soda', ok: true, loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP' });
+    return;
+  }
+
+  if (pn === '/api/soda/user/playlists') {
+    try {
+      const data = await handleSodaUserPlaylists();
+      sendJSON(res, data);
+    } catch (err) {
+      console.error('[SodaUserPlaylists]', err);
+      sendJSON(res, { provider: 'soda', loggedIn: false, error: err.message, playlists: [] }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/playlist/tracks') {
+    try {
+      const id = url.searchParams.get('id') || url.searchParams.get('playlist_id') || '';
+      const data = await handleSodaPlaylistTracks(id);
+      sendJSON(res, data);
+    } catch (err) {
+      console.error('[SodaPlaylistTracks]', err);
+      sendJSON(res, { provider: 'soda', error: err.message, tracks: [] }, 500);
     }
     return;
   }
@@ -4464,7 +6293,7 @@ const server = http.createServer(async (req, res) => {
       const sid = url.searchParams.get('id');
       const quality = url.searchParams.get('quality') || '';
       const loginInfo = await getLoginInfo();
-      const info = await handleSongUrl(sid, loginInfo, quality);
+      const info = await handleSongUrl(sid, loginInfo, quality, playbackRequestOptionsFromSearchParams(url.searchParams));
       sendJSON(res, {
         ...info,
         loggedIn: loginInfo.loggedIn,

@@ -1,0 +1,54 @@
+name: Build macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload assets to
+        required: true
+        default: v1.1.1
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x64
+          - os: macos-14
+            arch: arm64
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+
+      - name: Build macOS package
+        run: npm run build:mac -- --${{ matrix.arch }} --publish never
+
+      - name: Upload release assets
+        run: |
+          gh release upload "${{ inputs.tag }}" \
+            dist/Mineradio-*-Mac-${{ matrix.arch }}.dmg \
+            dist/Mineradio-*-Mac-${{ matrix.arch }}.zip \
+            --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
