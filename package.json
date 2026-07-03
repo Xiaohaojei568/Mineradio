@@ -20,18 +20,27 @@
       "buildResources": "build"
     },
     "afterPack": "build/after-pack.js",
+    "compression": "maximum",
+    "electronLanguages": [
+      "zh-CN",
+      "zh-TW",
+      "en-US"
+    ],
     "toolsets": {
       "winCodeSign": "1.1.0"
     },
     "files": [
       "desktop/**/*",
       "public/**/*",
-      "build/**/*",
+      "build/icon.ico",
       "server.js",
       "dj-analyzer.js",
       "package.json",
       "!public/index.*.html",
-      "public/index.html"
+      "public/index.html",
+      "!node_modules/gsap/**/*",
+      "!node_modules/xml2js/lib/xml2js.bc.js",
+      "!node_modules/NeteaseCloudMusicApi/public/**/*"
     ],
     "asar": false,
     "win": {
