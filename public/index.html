@@ -21609,8 +21609,144 @@ function scheduleAudioResumePosition(media, seconds, token) {
   applyResume();
 }
 
+function queueExpansionCandidateSongs(list) {
+  return (Array.isArray(list) ? list : []).filter(function(song){
+    return song && (song.id || song.mid || song.songmid || song.sodaId || song.vid || song.name);
+  });
+}
+
+function queueSongRoughMatch(a, b) {
+  if (!a || !b) return false;
+  var ak = queueItemKey(a);
+  var bk = queueItemKey(b);
+  if (ak && bk && ak === bk) return true;
+  var an = normalizeMatchText(a.name || a.title || '');
+  var bn = normalizeMatchText(b.name || b.title || '');
+  if (!an || an !== bn) return false;
+  var aa = normalizeMatchText(a.artist || '');
+  var ba = normalizeMatchText(b.artist || '');
+  return !!aa && !!ba && aa === ba;
+}
+
+function queueSongListMatchIndex(list, song) {
+  list = queueExpansionCandidateSongs(list);
+  for (var i = 0; i < list.length; i++) {
+    if (queueSongRoughMatch(list[i], song)) return i;
+  }
+  return -1;
+}
+
+function applySingleQueueExpansionFromList(list, song, reason) {
+  list = queueExpansionCandidateSongs(list);
+  if (list.length <= 1) return -1;
+  var matchIdx = queueSongListMatchIndex(list, song);
+  if (matchIdx < 0) return -1;
+  playQueue = list.map(cloneSong);
+  currentIdx = matchIdx;
+  safeRenderQueuePanel(reason || 'single-queue-expand', { scrollCurrent: miniQueueOpen });
+  safeShelfRebuild(reason || 'single-queue-expand', true);
+  forcePlaybackControlsInteractive();
+  return matchIdx;
+}
+
+function mergeCurrentSongWithPlaylistTracks(song, tracks) {
+  var out = [cloneSong(song)];
+  var seen = {};
+  var currentKey = queueItemKey(song);
+  if (currentKey) seen[currentKey] = true;
+  queueExpansionCandidateSongs(tracks).forEach(function(item){
+    var key = queueItemKey(item);
+    if (key && seen[key]) return;
+    if (queueSongRoughMatch(item, song)) return;
+    if (key) seen[key] = true;
+    out.push(cloneSong(item));
+  });
+  return out;
+}
+
+function sameProviderPlaylistCandidates(provider) {
+  provider = normalizeMusicProvider(provider);
+  var lists = [];
+  try { lists = visibleUserPlaylists().slice(); }
+  catch (e) { lists = (userPlaylists || []).slice(); }
+  return lists
+    .filter(function(pl){
+      return pl && pl.id && normalizeMusicProvider(pl.provider) === provider && Number(pl.trackCount || 0) !== 1;
+    })
+    .sort(function(a, b){
+      var an = String(a.name || '').toLowerCase();
+      var bn = String(b.name || '').toLowerCase();
+      var as = /liked|favorite|heart|love|\u559c\u6b22|\u6536\u85cf/.test(an) ? 10 : 0;
+      var bs = /liked|favorite|heart|love|\u559c\u6b22|\u6536\u85cf/.test(bn) ? 10 : 0;
+      return bs - as;
+    });
+}
+
+async function fetchPlaylistTracksForQueueExpansion(pl) {
+  if (!pl || !pl.id) return [];
+  var provider = normalizeMusicProvider(pl.provider);
+  var url = provider === 'soda'
+    ? '/api/soda/playlist/tracks?id=' + encodeURIComponent(pl.id)
+    : (provider === 'qq'
+      ? '/api/qq/playlist/tracks?id=' + encodeURIComponent(pl.id)
+      : '/api/playlist/tracks?id=' + encodeURIComponent(pl.id));
+  var data = await apiJson(url);
+  return queueExpansionCandidateSongs(data && data.tracks || []);
+}
+
+async function expandSingleQueueFromUserPlaylist(song) {
+  if (!song || song.type === 'local' || song.source === 'local' || song.type === 'podcast' || song.source === 'podcast') return -1;
+  var provider = songProviderKey(song);
+  if (provider !== 'netease' && provider !== 'qq' && provider !== 'soda') return -1;
+  if (!userPlaylists.length) {
+    try { await refreshUserPlaylists(true); } catch (e) {}
+  }
+  var candidates = sameProviderPlaylistCandidates(provider).slice(0, 4);
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      var tracks = await fetchPlaylistTracksForQueueExpansion(candidates[i]);
+      if (tracks.length <= 1) continue;
+      var matchIdx = applySingleQueueExpansionFromList(tracks, song, 'single-queue-playlist-match');
+      if (matchIdx >= 0) return matchIdx;
+      var merged = mergeCurrentSongWithPlaylistTracks(song, tracks);
+      if (merged.length <= 1) continue;
+      playQueue = merged;
+      currentIdx = 0;
+      safeRenderQueuePanel('single-queue-playlist-fill', { scrollCurrent: miniQueueOpen });
+      safeShelfRebuild('single-queue-playlist-fill', true);
+      forcePlaybackControlsInteractive();
+      return 0;
+    } catch (e) {
+      console.warn('[SingleQueuePlaylistExpand]', candidates[i] && candidates[i].id, e);
+    }
+  }
+  return -1;
+}
+
+async function maybeExpandSingleSongQueue(idx, opts) {
+  opts = opts || {};
+  if (opts.autoRepeat || opts.skipSingleQueueExpand) return idx;
+  if (playQueue.length !== 1 || idx !== 0) return idx;
+  var song = playQueue[0];
+  if (!song || song.type === 'local' || song.source === 'local' || song.type === 'podcast' || song.source === 'podcast') return idx;
+  var sources = [
+    playlistPanelDetailState && playlistPanelDetailState.tracks,
+    typeof detailArtistSongs !== 'undefined' ? detailArtistSongs : [],
+    typeof playlist !== 'undefined' ? playlist : [],
+    typeof scopedHomeSongs === 'function' ? scopedHomeSongs() : [],
+    homeDiscoverState && homeDiscoverState.recommendationSongs,
+  ];
+  for (var i = 0; i < sources.length; i++) {
+    var matchIdx = applySingleQueueExpansionFromList(sources[i], song, 'single-queue-context-expand');
+    if (matchIdx >= 0) return matchIdx;
+  }
+  var expandedIdx = await expandSingleQueueFromUserPlaylist(song);
+  return expandedIdx >= 0 ? expandedIdx : idx;
+}
+
 async function playQueueAt(idx, opts) {
   opts = opts || {};
+  if (!opts.skipSingleQueueExpand) idx = await maybeExpandSingleSongQueue(idx, opts);
   if (idx < 0 || idx >= playQueue.length) return;
   markRenderInteraction('track-switch', 1500);
   var playPhase = 'start';

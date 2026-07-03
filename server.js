@@ -71,7 +71,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const COOKIE_FILE = process.env.COOKIE_FILE || path.join(__dirname, '.cookie');
 const QQ_COOKIE_FILE = process.env.QQ_COOKIE_FILE || path.join(__dirname, '.qq-cookie');
-const SODA_COOKIE_FILE = process.env.SODA_COOKIE_FILE || path.join(__dirname, '.soda-cookie');
+const SODA_COOKIE_FILE = process.env.SODA_COOKIE_FILE || path.join(mineradioUserDataDir(), '.soda-cookie');
 const UPDATE_WORK_DIR = process.env.MINERADIO_UPDATE_DIR || path.join(__dirname, 'updates');
 const UPDATE_DOWNLOAD_DIR = process.env.MINERADIO_UPDATE_DOWNLOAD_DIR || path.join(UPDATE_WORK_DIR, 'downloads');
 const UPDATE_PATCH_BACKUP_DIR = process.env.MINERADIO_PATCH_BACKUP_DIR || path.join(UPDATE_WORK_DIR, 'backups', 'patches');
@@ -100,6 +100,20 @@ const WEATHER_DEFAULT_LOCATION = {
 };
 
 const updateDownloadJobs = new Map();
+
+function mineradioUserDataDir() {
+  if (process.env.MINERADIO_USER_DATA_DIR) return process.env.MINERADIO_USER_DATA_DIR;
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, 'Mineradio');
+  if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'Mineradio');
+  return __dirname;
+}
+
+function writePrivateStateFile(file, text) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  } catch (e) {}
+}
 
 let ffmpegBinaryPath = process.env.FFMPEG_PATH || '';
 try {
@@ -212,7 +226,7 @@ try { if (fs.existsSync(SODA_COOKIE_FILE)) sodaCookie = fs.readFileSync(SODA_COO
 catch (e) { sodaCookie = ''; }
 function saveSodaCookie(c) {
   sodaCookie = normalizeCookieHeader(c) || rawCookieFallback(c);
-  try { fs.writeFileSync(SODA_COOKIE_FILE, sodaCookie); } catch (e) {}
+  writePrivateStateFile(SODA_COOKIE_FILE, sodaCookie);
 }
 
 // ---------- 工具 ----------
@@ -2256,28 +2270,163 @@ let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
 let sodaLoginInfoCache = null;
 let sodaLoginInfoCacheAt = 0;
+let sodaLastLocalSync = { checkedAt: 0, userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
 const sodaPlaybackSessions = new Map();
 
+function uniqueExistingOrder(items) {
+  const out = [];
+  const seen = new Set();
+  (items || []).forEach(item => {
+    const value = String(item || '').trim();
+    if (!value) return;
+    const key = process.platform === 'win32' ? value.toLowerCase() : value;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(value);
+  });
+  return out;
+}
+
+function expandWindowsEnvVars(value) {
+  return String(value || '').replace(/%([^%]+)%/g, (all, name) => process.env[name] || process.env[String(name).toUpperCase()] || all);
+}
+
+function normalizeWindowsPathHint(value) {
+  let raw = expandWindowsEnvVars(value).trim();
+  if (!raw) return '';
+  const quoted = raw.match(/^"([^"]+)"/);
+  if (quoted) raw = quoted[1];
+  else {
+    const exe = raw.match(/^([A-Za-z]:\\.*?\.exe)(?:[\s,]|$)/i);
+    if (exe) raw = exe[1];
+  }
+  raw = raw.replace(/^file:\/+/i, '').trim();
+  return raw.replace(/[\\/]+$/, '');
+}
+
+function installRootFromPathHint(value) {
+  const normalized = normalizeWindowsPathHint(value);
+  if (!normalized) return '';
+  const ext = path.extname(normalized).toLowerCase();
+  return ext === '.exe' || ext === '.lnk' ? path.dirname(normalized) : normalized;
+}
+
+function sodaUserDataNameCandidates() {
+  return ['SodaMusic', 'Soda Music', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
+}
+
+function sodaKnownUserDataDirs() {
+  const dirs = [];
+  function pushDir(dir) {
+    if (dir) dirs.push(dir);
+  }
+  pushDir(process.env.SODA_USER_DATA_DIR);
+  for (const root of [process.env.APPDATA, process.env.LOCALAPPDATA]) {
+    if (!root) continue;
+    for (const name of sodaUserDataNameCandidates()) pushDir(path.join(root, name));
+  }
+  if (process.env.USERPROFILE) {
+    for (const name of sodaUserDataNameCandidates()) {
+      pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', name));
+      pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Local', name));
+    }
+  }
+  return uniqueExistingOrder(dirs);
+}
+
 function sodaUserDataDir() {
-  return process.env.SODA_USER_DATA_DIR
-    || (process.env.APPDATA ? path.join(process.env.APPDATA, 'SodaMusic') : '');
+  const dirs = sodaKnownUserDataDirs();
+  return dirs.find(dir => {
+    try { return dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory(); }
+    catch (e) { return false; }
+  }) || dirs[0] || '';
+}
+
+function sodaInstallNameCandidates() {
+  return ['Soda Music', 'SodaMusic', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
+}
+
+function readSodaRegistryInstallRoots() {
+  if (process.platform !== 'win32') return [];
+  const roots = [];
+  const hives = [
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ];
+  const nameRe = /soda|qishui|luna|\u6c7d\u6c34/i;
+  function flush(values) {
+    const displayName = values.DisplayName || values.Publisher || '';
+    const combined = [displayName, values.InstallLocation, values.DisplayIcon, values.UninstallString].filter(Boolean).join(' ');
+    if (!nameRe.test(combined)) return;
+    [values.InstallLocation, values.DisplayIcon, values.UninstallString].forEach(value => {
+      const root = installRootFromPathHint(value);
+      if (root) roots.push(root);
+    });
+  }
+  for (const hive of hives) {
+    let out = '';
+    try {
+      out = execFileSync('reg', ['query', hive, '/s'], {
+        encoding: 'utf8',
+        timeout: 3000,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch (e) {
+      continue;
+    }
+    let values = {};
+    String(out || '').split(/\r?\n/).forEach(line => {
+      if (/^HKEY_/i.test(line.trim())) {
+        flush(values);
+        values = {};
+        return;
+      }
+      const match = line.match(/^\s{2,}([^\s]+)\s+REG_\w+\s+(.*)$/);
+      if (match) values[match[1]] = match[2].trim();
+    });
+    flush(values);
+  }
+  return roots;
+}
+
+function readRunningSodaProcessRoots() {
+  if (process.platform !== 'win32') return [];
+  try {
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process | Where-Object { $_.ProcessName -match 'soda|luna|qishui' } | ForEach-Object { $_.Path }";
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 2500,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return String(out || '').split(/\r?\n/).map(installRootFromPathHint).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
 }
 
 function sodaKnownInstallRoots() {
   const roots = [];
   function pushRoot(root) {
-    if (root && roots.indexOf(root) < 0) roots.push(root);
+    if (root) roots.push(root);
   }
   pushRoot(process.env.SODA_INSTALL_DIR);
   pushRoot(process.env.SODA_CLIENT_DIR);
-  pushRoot('D:\\InstallationPackage\\qsyy\\Soda Music');
   if (process.env.LOCALAPPDATA) {
-    pushRoot(path.join(process.env.LOCALAPPDATA, 'Programs', 'Soda Music'));
-    pushRoot(path.join(process.env.LOCALAPPDATA, 'Soda Music'));
+    for (const name of sodaInstallNameCandidates()) {
+      pushRoot(path.join(process.env.LOCALAPPDATA, 'Programs', name));
+      pushRoot(path.join(process.env.LOCALAPPDATA, name));
+    }
   }
-  if (process.env.PROGRAMFILES) pushRoot(path.join(process.env.PROGRAMFILES, 'Soda Music'));
-  if (process.env['PROGRAMFILES(X86)']) pushRoot(path.join(process.env['PROGRAMFILES(X86)'], 'Soda Music'));
-  return roots;
+  for (const programRoot of [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)']]) {
+    if (!programRoot) continue;
+    for (const name of sodaInstallNameCandidates()) pushRoot(path.join(programRoot, name));
+  }
+  readSodaRegistryInstallRoots().forEach(pushRoot);
+  readRunningSodaProcessRoots().forEach(pushRoot);
+  return uniqueExistingOrder(roots);
 }
 
 function compareVersionText(a, b) {
@@ -2397,21 +2546,23 @@ function sodaBdticketSettings() {
 }
 
 function readSodaDeviceInfoFresh() {
-  const dir = sodaUserDataDir();
-  const file = dir ? path.join(dir, 'DeviceV1') : '';
-  if (!file || !fs.existsSync(file)) return {};
-  try {
-    const raw = fs.readFileSync(file);
-    let text = '';
-    try { text = zlib.gunzipSync(raw).toString('utf8'); }
-    catch (e1) {
-      try { text = zlib.inflateSync(raw).toString('utf8'); }
-      catch (e2) { text = raw.toString('utf8'); }
+  for (const dir of sodaKnownUserDataDirs()) {
+    const file = dir ? path.join(dir, 'DeviceV1') : '';
+    if (!pathExistsFile(file)) continue;
+    try {
+      const raw = fs.readFileSync(file);
+      let text = '';
+      try { text = zlib.gunzipSync(raw).toString('utf8'); }
+      catch (e1) {
+        try { text = zlib.inflateSync(raw).toString('utf8'); }
+        catch (e2) { text = raw.toString('utf8'); }
+      }
+      return JSON.parse(text.replace(/\u0000/g, '').trim());
+    } catch (e) {
+      continue;
     }
-    return JSON.parse(text.replace(/\u0000/g, '').trim());
-  } catch (e) {
-    return {};
   }
+  return {};
 }
 
 function initSodaNativeSecurity() {
@@ -2474,28 +2625,129 @@ function sodaCookieObject() {
   return parseCookieString(sodaCookie);
 }
 
-function readSodaCookieFromClient() {
-  const dir = sodaUserDataDir();
-  const db = dir ? path.join(dir, 'Network', 'Cookies') : '';
-  if (!db || !fs.existsSync(db)) return '';
+function pathExistsFile(file) {
+  try { return !!file && fs.existsSync(file) && fs.statSync(file).isFile(); }
+  catch (e) { return false; }
+}
+
+function pathExistsDir(dir) {
+  try { return !!dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory(); }
+  catch (e) { return false; }
+}
+
+function findFilesByName(root, fileName, maxDepth, maxResults, out) {
+  out = out || [];
+  if (!pathExistsDir(root) || maxDepth < 0 || out.length >= maxResults) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (e) { return out; }
+  for (const entry of entries) {
+    if (out.length >= maxResults) break;
+    const full = path.join(root, entry.name);
+    if (entry.isFile() && entry.name === fileName) {
+      out.push(full);
+      continue;
+    }
+    if (!entry.isDirectory() || maxDepth <= 0) continue;
+    if (/^(Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|blob_storage|Service Worker|Session Storage|TTNet|TTNetCache|logs?)$/i.test(entry.name)) continue;
+    findFilesByName(full, fileName, maxDepth - 1, maxResults, out);
+  }
+  return out;
+}
+
+function sodaCookieDbCandidates() {
+  const directRelatives = [
+    ['Network', 'Cookies'],
+    ['Default', 'Network', 'Cookies'],
+    ['User Data', 'Default', 'Network', 'Cookies'],
+    ['Partitions', 'persist_luna', 'Network', 'Cookies'],
+    ['Partitions', 'persist:soda', 'Network', 'Cookies'],
+  ];
+  const candidates = [];
+  for (const dir of sodaKnownUserDataDirs()) {
+    for (const rel of directRelatives) candidates.push(path.join(dir, ...rel));
+    findFilesByName(dir, 'Cookies', 4, 16, candidates);
+  }
+  return uniqueExistingOrder(candidates)
+    .filter(pathExistsFile)
+    .sort((a, b) => {
+      try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; }
+      catch (e) { return 0; }
+    });
+}
+
+function readCookieRowsWithNodeSqlite(dbPath) {
   try {
-    const sql = "select name,value from cookies where host_key like '%qishui.com%' and value != ''";
-    const out = execFileSync('sqlite3', ['-separator', '\t', db, sql], {
+    const sqlite = require('node:sqlite');
+    if (!sqlite || !sqlite.DatabaseSync) return null;
+    const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return db.prepare(
+        "select host_key,name,value,path,last_update_utc,creation_utc from cookies where host_key like ? and value != '' order by last_update_utc asc, creation_utc asc"
+      ).all('%qishui.com%');
+    } finally {
+      try { db.close(); } catch (e) {}
+    }
+  } catch (e) {
+    return null;
+  }
+}
+
+function readCookieRowsWithSqliteCli(dbPath) {
+  try {
+    const sql = "select host_key,name,value,path,last_update_utc,creation_utc from cookies where host_key like '%qishui.com%' and value != '' order by last_update_utc asc, creation_utc asc";
+    const out = execFileSync('sqlite3', ['-separator', '\t', dbPath, sql], {
       encoding: 'utf8',
       timeout: 3000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const picked = new Map();
-    String(out || '').split(/\r?\n/).forEach(line => {
-      const idx = line.indexOf('\t');
-      if (idx <= 0) return;
-      collectCookiePair(picked, line.slice(0, idx), line.slice(idx + 1));
-    });
-    return Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+    return String(out || '').split(/\r?\n/).map(line => {
+      const parts = line.split('\t');
+      return parts.length >= 3 ? { host_key: parts[0], name: parts[1], value: parts[2], path: parts[3] || '' } : null;
+    }).filter(Boolean);
   } catch (e) {
-    return '';
+    return null;
   }
+}
+
+function readSodaCookieRows(dbPath) {
+  return readCookieRowsWithNodeSqlite(dbPath) || readCookieRowsWithSqliteCli(dbPath) || [];
+}
+
+function sodaClientDetected() {
+  return sodaKnownUserDataDirs().some(pathExistsDir) || !!resolveSodaOfficialClientDir();
+}
+
+function sodaLocalSyncMessage() {
+  if (!sodaLastLocalSync.userDataDirs.length) return '未找到汽水音乐本机数据目录，请先安装并打开汽水音乐客户端完成登录';
+  if (!sodaLastLocalSync.cookieDbs.length) return '已找到汽水音乐数据目录，但没有发现登录 Cookie 数据库，请先打开汽水音乐客户端完成登录';
+  if (!sodaLastLocalSync.cookies) return '已找到汽水音乐 Cookie 数据库，但没有读取到有效登录会话，请确认汽水音乐客户端已登录';
+  return '';
+}
+
+function readSodaCookieFromClient() {
+  const userDataDirs = sodaKnownUserDataDirs().filter(pathExistsDir);
+  const cookieDbs = sodaCookieDbCandidates();
+  const picked = new Map();
+  let lastError = '';
+  for (const dbPath of cookieDbs) {
+    try {
+      for (const row of readSodaCookieRows(dbPath)) {
+        collectCookiePair(picked, row && row.name, row && row.value);
+      }
+    } catch (e) {
+      lastError = e.message || String(e);
+    }
+  }
+  sodaLastLocalSync = {
+    checkedAt: Date.now(),
+    userDataDirs,
+    cookieDbs,
+    cookies: picked.size,
+    error: lastError,
+  };
+  return Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
 function refreshSodaCookieFromClient(force) {
@@ -2888,10 +3140,9 @@ function mapSodaPlaylist(pl) {
 function readSodaCachedVipLevel(userId) {
   const id = String(userId || '').replace(/\D/g, '');
   if (!id) return '';
-  const dir = sodaUserDataDir();
-  const files = [
-    dir ? path.join(dir, 'LunaCacheV2', 'entries.db') : '',
-  ].filter(Boolean);
+  const files = sodaKnownUserDataDirs()
+    .map(dir => dir ? path.join(dir, 'LunaCacheV2', 'entries.db') : '')
+    .filter(pathExistsFile);
   for (const file of files) {
     try {
       if (!fs.existsSync(file)) continue;
@@ -2982,6 +3233,8 @@ async function getSodaLoginInfo(opts) {
   const cookieObj = sodaCookieObject();
   if (!sodaCookie || !(cookieObj.sessionid || cookieObj.sid_tt || cookieObj.uid_tt)) {
     const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: !!sodaUserDataDir() };
+    emptyInfo.clientDetected = sodaClientDetected();
+    emptyInfo.message = sodaLocalSyncMessage();
     sodaLoginInfoCache = { cookie: sodaCookie, info: emptyInfo };
     sodaLoginInfoCacheAt = now;
     return { ...emptyInfo };
@@ -3002,11 +3255,14 @@ async function getSodaLoginInfo(opts) {
       hasCookie: true,
       clientDetected: true,
     };
+    result.clientDetected = sodaClientDetected();
     sodaLoginInfoCache = { cookie: sodaCookie, info: result };
     sodaLoginInfoCacheAt = now;
     return { ...result };
   } catch (e) {
     const errorInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: true, error: e.message };
+    errorInfo.clientDetected = sodaClientDetected();
+    errorInfo.message = e.message || sodaLocalSyncMessage();
     sodaLoginInfoCache = { cookie: sodaCookie, info: errorInfo };
     sodaLoginInfoCacheAt = now;
     return { ...errorInfo };

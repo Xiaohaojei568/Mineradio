@@ -1364,6 +1364,8 @@ async function createWindow() {
   process.env.PORT = String(port);
   process.env.COOKIE_FILE = path.join(app.getPath('userData'), '.cookie');
   process.env.QQ_COOKIE_FILE = path.join(app.getPath('userData'), '.qq-cookie');
+  process.env.SODA_COOKIE_FILE = path.join(app.getPath('userData'), '.soda-cookie');
+  process.env.MINERADIO_USER_DATA_DIR = app.getPath('userData');
   process.env.MINERADIO_UPDATE_DIR = getUpdateDownloadDir();
   try {
     const legacyQQCookie = path.join(__dirname, '..', '.qq-cookie');
@@ -1375,6 +1377,17 @@ async function createWindow() {
     }
   } catch (e) {
     console.warn('QQ cookie migration skipped:', e.message);
+  }
+  try {
+    const legacySodaCookie = path.join(__dirname, '..', '.soda-cookie');
+    if (fs.existsSync(legacySodaCookie)) {
+      if (!fs.existsSync(process.env.SODA_COOKIE_FILE)) {
+        fs.copyFileSync(legacySodaCookie, process.env.SODA_COOKIE_FILE);
+      }
+      fs.unlinkSync(legacySodaCookie);
+    }
+  } catch (e) {
+    console.warn('Soda cookie migration skipped:', e.message);
   }
 
   localServer = require(path.join(__dirname, '..', 'server.js'));
