@@ -265,8 +265,18 @@ function parseGitHubRepository(input) {
   if (github) return { owner: github[1], repo: github[2].replace(/\.git$/i, '') };
   return null;
 }
+function parseGiteeRepository(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return null;
+  const direct = raw.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (direct) return { owner: direct[1], repo: direct[2].replace(/\.git$/i, '') };
+  const gitee = raw.match(/gitee\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[#/?].*)?$/i);
+  if (gitee) return { owner: gitee[1], repo: gitee[2].replace(/\.git$/i, '') };
+  return null;
+}
 function readUpdateConfig(pkg) {
   const local = (pkg && pkg.mineradio && pkg.mineradio.update) || {};
+  const giteeLocal = local.gitee || {};
   const repoHint = process.env.MINERADIO_UPDATE_REPOSITORY
     || process.env.GITHUB_REPOSITORY
     || local.repository
@@ -276,11 +286,27 @@ function readUpdateConfig(pkg) {
   const parsed = parseGitHubRepository(repoHint) || {};
   const owner = process.env.MINERADIO_UPDATE_OWNER || local.owner || parsed.owner || '';
   const repo = process.env.MINERADIO_UPDATE_REPO || local.repo || parsed.repo || '';
+  const giteeHint = process.env.MINERADIO_GITEE_REPOSITORY
+    || process.env.MINERADIO_UPDATE_GITEE_REPOSITORY
+    || giteeLocal.repository
+    || giteeLocal.url
+    || local.giteeRepository
+    || (typeof local.gitee === 'string' ? local.gitee : '')
+    || '';
+  const parsedGitee = parseGiteeRepository(giteeHint) || {};
+  const giteeOwner = process.env.MINERADIO_GITEE_OWNER || process.env.MINERADIO_UPDATE_GITEE_OWNER || giteeLocal.owner || parsedGitee.owner || '';
+  const giteeRepo = process.env.MINERADIO_GITEE_REPO || process.env.MINERADIO_UPDATE_GITEE_REPO || giteeLocal.repo || parsedGitee.repo || '';
   return {
     provider: local.provider || 'github',
     owner,
     repo,
     configured: !!(owner && repo),
+    gitee: {
+      owner: giteeOwner,
+      repo: giteeRepo,
+      configured: !!(giteeOwner && giteeRepo),
+      prefer: giteeLocal.prefer !== false,
+    },
     preview: local.preview !== false,
     preferMirrors: local.preferMirrors !== false,
     mirrors: readUpdateMirrors(local),
@@ -345,6 +371,22 @@ function isConfiguredUpdateMirrorUrl(url, mirrors) {
     return prefix && lower.startsWith(prefix);
   });
 }
+function isGitHubReleaseUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return /(^|\.)github\.com$/i.test(u.hostname) && /\/releases\/download\//i.test(u.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+function isGiteeReleaseUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return /(^|\.)gitee\.com$/i.test(u.hostname) && /\/releases\/download\//i.test(u.pathname);
+  } catch (_) {
+    return false;
+  }
+}
 function uniqueDownloadCandidates(urls, opts) {
   opts = opts || {};
   const directUrls = (Array.isArray(urls) ? urls : [urls])
@@ -353,7 +395,7 @@ function uniqueDownloadCandidates(urls, opts) {
   const directSet = new Set(directUrls.map(url => url.toLowerCase()));
   const mirrors = opts.useMirrors === false ? [] : (UPDATE_CONFIG.mirrors || []);
   const mirrored = [];
-  directUrls.filter(source => !isConfiguredUpdateMirrorUrl(source, mirrors)).forEach(source => {
+  directUrls.filter(source => isGitHubReleaseUrl(source) && !isConfiguredUpdateMirrorUrl(source, mirrors)).forEach(source => {
     mirrors.forEach((mirror, index) => {
       const url = buildMirrorUrl(source, mirror);
       if (url) mirrored.push({
@@ -365,10 +407,14 @@ function uniqueDownloadCandidates(urls, opts) {
   });
   const direct = directUrls.map(url => ({
     url,
-    label: directSet.has(url.toLowerCase()) ? 'GitHub 直连' : '下载线路',
+    label: isGiteeReleaseUrl(url) ? 'Gitee 国内源' : (directSet.has(url.toLowerCase()) ? 'GitHub 直连' : '下载线路'),
     mirrored: isConfiguredUpdateMirrorUrl(url, mirrors),
   }));
-  const ordered = UPDATE_CONFIG.preferMirrors === false ? direct.concat(mirrored) : mirrored.concat(direct);
+  const giteeDirect = direct.filter(item => isGiteeReleaseUrl(item.url));
+  const otherDirect = direct.filter(item => !isGiteeReleaseUrl(item.url));
+  const ordered = UPDATE_CONFIG.preferMirrors === false
+    ? direct.concat(mirrored)
+    : giteeDirect.concat(mirrored).concat(otherDirect);
   const seen = new Set();
   return ordered.filter(item => {
     const key = item.url.toLowerCase();
@@ -418,14 +464,14 @@ function extractReleaseNotes(body) {
   });
   return notes.slice(0, 4);
 }
-function pickReleaseAsset(assets) {
+function pickReleaseAsset(assets, latestVersion) {
   const list = Array.isArray(assets) ? assets : [];
   const preferred = list.find(a => /\.(exe|msi)$/i.test(a && a.name || ''))
     || list.find(a => /\.(zip|7z)$/i.test(a && a.name || ''))
     || list[0];
   if (!preferred) return null;
   const digest = assetDigestInfo(preferred);
-  const candidates = uniqueDownloadCandidates(preferred.browser_download_url || '');
+  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, preferred.browser_download_url || '', preferred.name || ''));
   return {
     name: preferred.name || '',
     size: preferred.size || 0,
@@ -458,7 +504,7 @@ function pickPatchAsset(assets, currentVersion, latestVersion) {
   }) || list.find(a => /\.(patch\.json|patch)$/i.test(a && a.name || ''));
   if (!preferred) return null;
   const digest = assetDigestInfo(preferred);
-  const candidates = uniqueDownloadCandidates(preferred.browser_download_url || '');
+  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, preferred.browser_download_url || '', preferred.name || ''));
   return {
     name: preferred.name || '',
     size: preferred.size || 0,
@@ -721,6 +767,19 @@ function githubReleaseDownloadUrl(version, fileName) {
   const encodedName = String(fileName || '').split('/').map(part => encodeURIComponent(part)).join('/');
   return `https://github.com/${encodedOwner}/${encodedRepo}/releases/download/${tag}/${encodedName}`;
 }
+function giteeReleaseDownloadUrl(version, fileName) {
+  const cfg = UPDATE_CONFIG.gitee || {};
+  if (!cfg.configured) return '';
+  const tag = 'v' + normalizeVersion(version);
+  const encodedOwner = encodeURIComponent(cfg.owner);
+  const encodedRepo = encodeURIComponent(cfg.repo);
+  const encodedName = String(fileName || '').split('/').map(part => encodeURIComponent(part)).join('/');
+  return `https://gitee.com/${encodedOwner}/${encodedRepo}/releases/download/${tag}/${encodedName}`;
+}
+function releaseAssetDownloadUrls(version, primaryUrl, assetName) {
+  const name = assetName || updateAssetNameFromUrl(primaryUrl);
+  return [giteeReleaseDownloadUrl(version, name), primaryUrl].filter(Boolean);
+}
 function parseLatestYmlUpdateInfo(text, reason) {
   const latestVersion = normalizeVersion(yamlScalar(text, 'version') || APP_VERSION) || APP_VERSION;
   const assetPath = yamlScalar(text, 'path') || yamlScalar(text, 'url') || `Mineradio-${latestVersion}-Setup.exe`;
@@ -728,7 +787,7 @@ function parseLatestYmlUpdateInfo(text, reason) {
   const size = Number(yamlScalar(text, 'size') || 0) || 0;
   const releaseDate = yamlScalar(text, 'releaseDate');
   const downloadUrl = githubReleaseDownloadUrl(latestVersion, assetPath);
-  const candidates = uniqueDownloadCandidates(downloadUrl);
+  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion, downloadUrl, assetPath));
   const asset = {
     name: updateAssetNameFromUrl(downloadUrl) || assetPath,
     size,
@@ -788,7 +847,7 @@ async function fetchLatestUpdateInfo() {
     }
     const data = await resp.json();
     const latestVersion = normalizeVersion(data.tag_name || data.name || APP_VERSION) || APP_VERSION;
-    const asset = pickReleaseAsset(data.assets);
+    const asset = pickReleaseAsset(data.assets, latestVersion);
     const patch = pickPatchAsset(data.assets, APP_VERSION, latestVersion);
     const notes = extractReleaseNotes(data.body).length ? extractReleaseNotes(data.body) : UPDATE_FALLBACK_NOTES;
     return {
@@ -3801,7 +3860,8 @@ async function getSodaLoginInfo(opts) {
   const canUseCache = !opts.sync && sodaLoginInfoCache && sodaLoginInfoCache.cookie === sodaCookie && now - sodaLoginInfoCacheAt < SODA_LOGIN_INFO_CACHE_MS;
   if (canUseCache) return { ...sodaLoginInfoCache.info };
   const cookieObj = sodaCookieObject();
-  if (!opts.sync) {
+  const hasSavedLoginTicket = !!sodaCookie && sodaCookieHasLoginTicket(cookieObj);
+  if (!opts.sync && !hasSavedLoginTicket) {
     const fastInfo = {
       provider: 'soda',
       loggedIn: false,
@@ -3818,7 +3878,7 @@ async function getSodaLoginInfo(opts) {
     sodaLoginInfoCacheAt = now;
     return { ...fastInfo };
   }
-  if (!sodaCookie || !sodaCookieHasLoginTicket(cookieObj)) {
+  if (!hasSavedLoginTicket) {
     const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: false };
     emptyInfo.clientDetected = sodaClientDetected(false);
     emptyInfo.message = sodaLocalSyncMessage();
@@ -3846,6 +3906,28 @@ async function getSodaLoginInfo(opts) {
     sodaLoginInfoCacheAt = now;
     return { ...result };
   } catch (e) {
+    if (!opts.sync && hasSavedLoginTicket) {
+      const staleInfo = {
+        provider: 'soda',
+        loggedIn: true,
+        nickname: 'Soda Music',
+        userId: '',
+        avatar: '',
+        vipType: 0,
+        vipLevel: 'none',
+        isVip: false,
+        isSvip: false,
+        vipLabel: '无VIP',
+        hasCookie: true,
+        clientDetected: sodaClientDetected(false),
+        stale: true,
+        error: e.message,
+        message: '已使用本机保存的汽水登录凭据，联网验证失败时保持登录状态',
+      };
+      sodaLoginInfoCache = { cookie: sodaCookie, info: staleInfo };
+      sodaLoginInfoCacheAt = now;
+      return { ...staleInfo };
+    }
     const errorInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: true, error: e.message };
     errorInfo.clientDetected = sodaClientDetected(false);
     errorInfo.message = e.message || sodaLocalSyncMessage();
@@ -6556,6 +6638,7 @@ const server = http.createServer(async (req, res) => {
         configured: UPDATE_CONFIG.configured,
         owner: UPDATE_CONFIG.owner,
         repo: UPDATE_CONFIG.repo,
+        gitee: UPDATE_CONFIG.gitee || {},
         preview: UPDATE_CONFIG.preview,
         manifestOverride: !!UPDATE_CONFIG.manifest,
       },

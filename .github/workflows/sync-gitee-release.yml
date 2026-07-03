@@ -1,0 +1,80 @@
+name: Sync Gitee release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to sync
+        required: true
+        default: v1.2.4
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync source, tag, and assets to Gitee
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+      RELEASE_NAME: ${{ github.event.release.name || format('Mineradio {0}', github.event.inputs.tag) }}
+      RELEASE_BODY: ${{ github.event.release.body || '' }}
+      GITEE_OWNER: xiao-majie
+      GITEE_REPO: mineradio
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_USERNAME: ${{ secrets.GITEE_USERNAME }}
+      GITEE_PUSH_URL: ${{ secrets.GITEE_PUSH_URL }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Push source and tag to Gitee
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${GITEE_PUSH_URL:-}" ]; then
+            remote_url="$GITEE_PUSH_URL"
+          elif [ -n "${GITEE_USERNAME:-}" ] && [ -n "${GITEE_TOKEN:-}" ]; then
+            remote_url="https://${GITEE_USERNAME}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          else
+            echo "Gitee git credentials are not configured; skip git push."
+            exit 0
+          fi
+          git remote remove gitee 2>/dev/null || true
+          git remote add gitee "$remote_url"
+          git push gitee HEAD:main
+          git push gitee "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" --force
+
+      - name: Download GitHub release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gitee-assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir gitee-assets --clobber || true
+          find gitee-assets -maxdepth 1 -type f -print | sort
+
+      - name: Create or update Gitee release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "GITEE_TOKEN is not configured; skip Gitee release upload."
+            exit 0
+          fi
+          printf '%s' "${RELEASE_BODY:-Mineradio ${RELEASE_TAG}}" > release-body.md
+          node build/sync-gitee-release.js gitee-assets/*
+        env:
+          RELEASE_BODY_FILE: release-body.md

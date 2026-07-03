@@ -1,7 +1,7 @@
 {
   "name": "mineradio",
   "productName": "Mineradio",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "沉浸式音乐播放器，融合天气电台、歌词舞台、粒子视觉和 3D 歌单架。",
   "author": "Mineradio",
   "main": "desktop/main.js",
@@ -10,7 +10,8 @@
     "start": "electron .",
     "build:win": "electron-builder --win nsis",
     "build:win:dir": "electron-builder --win dir",
-    "build:mac": "electron-builder --mac dmg zip"
+    "build:mac": "electron-builder --mac dmg zip",
+    "release:gitee": "node build/sync-gitee-release.js"
   },
   "build": {
     "appId": "com.mineradio.desktop",
@@ -104,6 +105,12 @@
       "provider": "github",
       "owner": "Xiaohaojei568",
       "repo": "Mineradio",
+      "gitee": {
+        "owner": "xiao-majie",
+        "repo": "mineradio",
+        "repository": "https://gitee.com/xiao-majie/mineradio.git",
+        "prefer": true
+      },
       "preview": true,
       "preferMirrors": true,
       "mirrors": [

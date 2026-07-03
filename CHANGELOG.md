@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.4
+
+- 修复汽水音乐已保存登录凭据后，关闭并重新打开 Mineradio 仍显示需要重新登录的问题；启动时会使用 `.soda-cookie` 做轻量恢复，临时验证失败也不会立刻把账号踢成未登录。
+- 发布流程新增 Gitee 国内同步：版本发布时同步源码、tag 和 Release 资产到 `https://gitee.com/xiao-majie/mineradio.git`，应用内更新会优先使用 Gitee Release 国内源，再回退到 GitHub 加速镜像和 GitHub 直连。
+- macOS 自动打包流程同步增强：GitHub Actions 生成 Intel / Apple Silicon 的 `.dmg` 和 `.zip` 后，会同时上传到 GitHub Release 和 Gitee Release。
+
 ## v1.2.3
 
 - 修复汽水音乐“读取本机登录”可能导致 Mineradio 卡死或崩溃的问题：登录同步改为先读取本机用户数据 Cookie，并在登录状态验证时避开汽水客户端原生签名模块加载。

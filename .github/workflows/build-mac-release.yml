@@ -55,3 +55,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+      - name: Upload Gitee release assets
+        run: |
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "GITEE_TOKEN is not configured; skip Gitee upload."
+            exit 0
+          fi
+          printf '%s' "$RELEASE_BODY" > release-body.md
+          node build/sync-gitee-release.js \
+            dist/Mineradio-*-Mac-${{ matrix.arch }}.dmg \
+            dist/Mineradio-*-Mac-${{ matrix.arch }}.zip
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: xiao-majie
+          GITEE_REPO: mineradio
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name || format('Mineradio {0}', github.event.inputs.tag) }}
+          RELEASE_BODY: ${{ github.event.release.body || '' }}
+          RELEASE_BODY_FILE: release-body.md

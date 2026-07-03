@@ -1,5 +1,12 @@
 # 发布流程
 
+## Gitee 国内同步
+
+- 正式发版同时维护 GitHub 和 Gitee：`https://github.com/Xiaohaojei568/Mineradio.git` 与 `https://gitee.com/xiao-majie/mineradio.git`。
+- GitHub Release 发布后，`.github/workflows/sync-gitee-release.yml` 会同步源码、tag 和 Release 资产到 Gitee。
+- macOS 自动打包完成后，`.github/workflows/build-mac-release.yml` 会把 Intel / Apple Silicon 的 `.dmg` 和 `.zip` 同步上传到 GitHub Release 与 Gitee Release。
+- GitHub Actions 需要配置 `GITEE_TOKEN`；如需同步 git main/tag，另配 `GITEE_USERNAME` + `GITEE_TOKEN`，或直接配置完整的 `GITEE_PUSH_URL`。
+
 ## v1.1.0 发布边界
 
 - `v1.1.0` 是纯净安装发布版，从当前 `resources/app` 可信源码重新构建。
