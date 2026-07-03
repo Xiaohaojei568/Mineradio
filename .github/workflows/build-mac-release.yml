@@ -1,6 +1,8 @@
 name: Build macOS release
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -28,7 +30,7 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.event.inputs.tag || github.event.release.tag_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -46,9 +48,10 @@ jobs:
 
       - name: Upload release assets
         run: |
-          gh release upload "${{ inputs.tag }}" \
+          gh release upload "$RELEASE_TAG" \
             dist/Mineradio-*-Mac-${{ matrix.arch }}.dmg \
             dist/Mineradio-*-Mac-${{ matrix.arch }}.zip \
             --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}

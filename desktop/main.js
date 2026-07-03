@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell, screen, session, globalShortcut, dialog } = require('electron');
 const net = require('net');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const { execFile, spawn } = require('child_process');
@@ -116,12 +117,79 @@ function findOpenPort(startPort) {
 }
 
 function waitForServer(server) {
-  if (!server || server.listening) return Promise.resolve();
+  if (!server) return Promise.reject(new Error('LOCAL_SERVER_MISSING'));
+  if (server.listening) return Promise.resolve();
 
   return new Promise((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+    };
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    server.once('listening', onListening);
+    server.once('error', onError);
   });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function probeLocalHttp(port) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/',
+      timeout: 1500,
+    }, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('LOCAL_SERVER_PROBE_TIMEOUT'));
+    });
+    req.on('error', reject);
+  });
+}
+
+async function waitForLocalHttp(port, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await probeLocalHttp(port);
+      return;
+    } catch (e) {
+      lastError = e;
+      await sleep(250);
+    }
+  }
+  throw lastError || new Error('LOCAL_SERVER_NOT_READY');
+}
+
+async function loadMainWindowUrl(win, port) {
+  const targetUrl = `http://127.0.0.1:${port}`;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    try {
+      await waitForLocalHttp(port, attempt <= 2 ? 4500 : 9000);
+      await win.loadURL(targetUrl);
+      return;
+    } catch (e) {
+      lastError = e;
+      console.warn(`Main window load attempt ${attempt} failed:`, e.message || e);
+      await sleep(Math.min(1600, 250 * attempt));
+    }
+  }
+  throw lastError || new Error('MAIN_WINDOW_LOAD_FAILED');
 }
 
 function isLocalMineradioUrl(url) {
@@ -1474,7 +1542,7 @@ async function createWindow() {
     setTimeout(() => applyWindowedBounds(mainWindow), 50);
   });
 
-  await mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  await loadMainWindowUrl(mainWindow, port);
 }
 
 app.setName(APP_NAME);
@@ -1499,10 +1567,13 @@ if (!gotSingleInstanceLock) {
     screen.on('display-added', () => scheduleWindowStateSend(mainWindow));
     screen.on('display-removed', () => scheduleWindowStateSend(mainWindow));
     await createWindow();
+  }).catch((e) => {
+    console.error('App startup failed:', e);
+    app.quit();
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) createWindow().catch((e) => console.error('Window activate failed:', e));
     else focusMainWindow();
   });
 

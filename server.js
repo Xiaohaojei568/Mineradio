@@ -332,6 +332,19 @@ function buildMirrorUrl(originalUrl, mirror) {
   if (base.includes('{url}')) return base.replace(/\{url\}/g, source);
   return base.replace(/\/+$/, '/') + source;
 }
+function updateMirrorUrlPrefix(mirror) {
+  const base = String(mirror || '').trim();
+  if (!/^https?:\/\//i.test(base)) return '';
+  return base.split('{')[0].replace(/\/+$/, '/').toLowerCase();
+}
+function isConfiguredUpdateMirrorUrl(url, mirrors) {
+  const lower = String(url || '').trim().toLowerCase();
+  if (!lower) return false;
+  return (mirrors || []).some(mirror => {
+    const prefix = updateMirrorUrlPrefix(mirror);
+    return prefix && lower.startsWith(prefix);
+  });
+}
 function uniqueDownloadCandidates(urls, opts) {
   opts = opts || {};
   const directUrls = (Array.isArray(urls) ? urls : [urls])
@@ -340,7 +353,7 @@ function uniqueDownloadCandidates(urls, opts) {
   const directSet = new Set(directUrls.map(url => url.toLowerCase()));
   const mirrors = opts.useMirrors === false ? [] : (UPDATE_CONFIG.mirrors || []);
   const mirrored = [];
-  directUrls.forEach(source => {
+  directUrls.filter(source => !isConfiguredUpdateMirrorUrl(source, mirrors)).forEach(source => {
     mirrors.forEach((mirror, index) => {
       const url = buildMirrorUrl(source, mirror);
       if (url) mirrored.push({
@@ -353,7 +366,7 @@ function uniqueDownloadCandidates(urls, opts) {
   const direct = directUrls.map(url => ({
     url,
     label: directSet.has(url.toLowerCase()) ? 'GitHub 直连' : '下载线路',
-    mirrored: false,
+    mirrored: isConfiguredUpdateMirrorUrl(url, mirrors),
   }));
   const ordered = UPDATE_CONFIG.preferMirrors === false ? direct.concat(mirrored) : mirrored.concat(direct);
   const seen = new Set();
@@ -748,11 +761,11 @@ function parseLatestYmlUpdateInfo(text, reason) {
     reason: reason || '',
   };
 }
-async function fetchLatestYmlUpdateInfo(reason) {
+async function fetchLatestYmlUpdateInfo(reason, timeoutMs) {
   if (!UPDATE_CONFIG.configured || UPDATE_CONFIG.provider !== 'github') throw updateError('UPDATE_REPOSITORY_NOT_CONFIGURED');
   const latestYmlUrl = `https://github.com/${encodeURIComponent(UPDATE_CONFIG.owner)}/${encodeURIComponent(UPDATE_CONFIG.repo)}/releases/latest/download/latest.yml`;
   const candidates = uniqueDownloadCandidates(latestYmlUrl);
-  const result = await fetchTextFromCandidates(candidates, 6500);
+  const result = await fetchTextFromCandidates(candidates, timeoutMs || 6500);
   return parseLatestYmlUpdateInfo(result.text, reason);
 }
 async function fetchLatestUpdateInfo() {
@@ -804,6 +817,55 @@ async function fetchLatestUpdateInfo() {
     catch (fallbackErr) { return localUpdateFallback((fallbackErr && fallbackErr.message) || reason, { configured: true }); }
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function updateAssetBaseName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    return path.basename(parsed.pathname || '').toLowerCase();
+  } catch (e) {
+    return path.basename(raw).toLowerCase();
+  }
+}
+
+function mergeLatestYmlInstallerDigest(info, latestYmlInfo) {
+  if (!info || !latestYmlInfo) return info;
+  if (normalizeVersion(info.latestVersion) !== normalizeVersion(latestYmlInfo.latestVersion)) return info;
+  const release = info.release || {};
+  const asset = release.asset || {};
+  const ymlRelease = latestYmlInfo.release || {};
+  const ymlAsset = ymlRelease.asset || {};
+  if (!asset.downloadUrl || !ymlAsset.downloadUrl) return info;
+  const assetName = updateAssetBaseName(asset.name || asset.downloadUrl);
+  const ymlName = updateAssetBaseName(ymlAsset.name || ymlAsset.downloadUrl);
+  if (assetName && ymlName && assetName !== ymlName) return info;
+
+  if (!asset.sha256 && ymlAsset.sha256) asset.sha256 = ymlAsset.sha256;
+  if (!asset.sha512 && ymlAsset.sha512) asset.sha512 = ymlAsset.sha512;
+  if (!asset.size && ymlAsset.size) asset.size = ymlAsset.size;
+  if (!release.downloadUrl && ymlRelease.downloadUrl) release.downloadUrl = ymlRelease.downloadUrl;
+  const urls = [asset.downloadUrl]
+    .concat(Array.isArray(asset.downloadUrls) ? asset.downloadUrls : [])
+    .concat(ymlAsset.downloadUrl || '')
+    .concat(Array.isArray(ymlAsset.downloadUrls) ? ymlAsset.downloadUrls : []);
+  asset.downloadUrls = publicDownloadUrls(uniqueDownloadCandidates(urls));
+  release.asset = asset;
+  info.release = release;
+  return info;
+}
+
+async function ensureUpdateInstallerDigest(info) {
+  const release = info && info.release ? info.release : {};
+  const asset = release.asset || {};
+  if (!info || !info.updateAvailable || asset.sha256 || asset.sha512) return info;
+  try {
+    const latestYmlInfo = await fetchLatestYmlUpdateInfo('installer digest', 5000);
+    return mergeLatestYmlInstallerDigest(info, latestYmlInfo);
+  } catch (e) {
+    return info;
   }
 }
 function safeUpdateFileName(name, version) {
@@ -2265,12 +2327,17 @@ const SODA_VERSION_CODE = process.env.SODA_VERSION_CODE || '30501';
 const SODA_DEFAULT_BUILD_ID = '36.4.0-rs.29.release.main.0';
 const SODA_PLAYBACK_SESSION_TTL_MS = 10 * 60 * 1000;
 const SODA_LOGIN_INFO_CACHE_MS = 8000;
+const SODA_CLIENT_SCAN_CACHE_FILE = process.env.SODA_CLIENT_SCAN_CACHE_FILE || path.join(mineradioUserDataDir(), 'soda-client-dir.json');
+const SODA_CLIENT_SCAN_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
+const SODA_CLIENT_NEGATIVE_SCAN_CACHE_MS = 60 * 1000;
+const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(5000, Math.min(180000, Number(process.env.SODA_CLIENT_GLOBAL_SCAN_MS) || 60000));
 let sodaAutoSyncEnabled = true;
 let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
 let sodaLoginInfoCache = null;
 let sodaLoginInfoCacheAt = 0;
 let sodaLastLocalSync = { checkedAt: 0, userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
+let sodaOfficialClientDirCache = null;
 const sodaPlaybackSessions = new Map();
 
 function uniqueExistingOrder(items) {
@@ -2451,28 +2518,211 @@ function sodaDeviceNodePath(versionDir) {
   return versionDir ? path.join(versionDir, 'resources', 'app.asar.unpacked', 'device.node') : '';
 }
 
+function isSodaOfficialClientDir(versionDir) {
+  try {
+    return !!versionDir
+      && fs.existsSync(sodaBdticketNodePath(versionDir))
+      && fs.existsSync(sodaBdmsNodePath(versionDir));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isSodaNativeModuleDir(nativeDir) {
+  try {
+    return !!nativeDir
+      && fs.existsSync(path.join(nativeDir, 'bdticket.node'))
+      && fs.existsSync(path.join(nativeDir, 'bdms.node'));
+  } catch (e) {
+    return false;
+  }
+}
+
+function sodaClientDirFromNativeModuleDir(nativeDir) {
+  const normalized = normalizeWindowsPathHint(nativeDir);
+  if (!normalized) return '';
+  const unpacked = normalized;
+  const resources = path.dirname(unpacked);
+  return path.dirname(resources);
+}
+
+function sodaClientDirFromNativeNodePath(nodePath) {
+  const normalized = normalizeWindowsPathHint(nodePath);
+  return normalized ? sodaClientDirFromNativeModuleDir(path.dirname(normalized)) : '';
+}
+
+function readSodaClientScanCache() {
+  try {
+    if (!fs.existsSync(SODA_CLIENT_SCAN_CACHE_FILE)) return '';
+    const data = JSON.parse(fs.readFileSync(SODA_CLIENT_SCAN_CACHE_FILE, 'utf8'));
+    const dir = String(data && data.clientDir || '');
+    const scannedAt = Number(data && data.scannedAt) || 0;
+    if (!dir || Date.now() - scannedAt > SODA_CLIENT_SCAN_CACHE_MS) return '';
+    return isSodaOfficialClientDir(dir) ? dir : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function writeSodaClientScanCache(clientDir) {
+  try {
+    writePrivateStateFile(SODA_CLIENT_SCAN_CACHE_FILE, JSON.stringify({
+      clientDir: clientDir || '',
+      scannedAt: Date.now(),
+    }, null, 2));
+  } catch (e) {}
+}
+
+function windowsFixedDriveRoots() {
+  if (process.platform !== 'win32') return [];
+  let roots = [];
+  try {
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_LogicalDisk -Filter \"DriveType=3\" | ForEach-Object { $_.DeviceID + '\\' }";
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 4000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    roots = String(out || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  } catch (e) {}
+  if (!roots.length) {
+    for (let code = 67; code <= 90; code++) {
+      const root = String.fromCharCode(code) + ':\\';
+      try { if (fs.existsSync(root)) roots.push(root); } catch (e) {}
+    }
+  }
+  return uniqueExistingOrder(roots).sort((a, b) => {
+    const ac = /^c:\\?$/i.test(a) ? 1 : 0;
+    const bc = /^c:\\?$/i.test(b) ? 1 : 0;
+    return ac - bc || a.localeCompare(b);
+  });
+}
+
+function shouldSkipSodaGlobalScanDir(dir, name) {
+  const lower = String(name || path.basename(dir) || '').toLowerCase();
+  if (!lower) return false;
+  if (lower === '$recycle.bin' || lower === 'system volume information' || lower === 'recovery') return true;
+  if (lower === 'windows' || lower === 'node_modules' || lower === '.git' || lower === '.svn') return true;
+  return false;
+}
+
+function sodaScanPriority(name) {
+  const lower = String(name || '').toLowerCase();
+  if (/soda|qishui|luna|qsyy|\u6c7d\u6c34/.test(lower)) return 0;
+  if (lower === 'resources') return 1;
+  if (/program|install|app|music|soft|software|\u8f6f\u4ef6|\u97f3\u4e50/.test(lower)) return 2;
+  return 5;
+}
+
+function findSodaClientDirsByGlobalScan() {
+  if (process.platform !== 'win32') return [];
+  const deadline = Date.now() + SODA_CLIENT_GLOBAL_SCAN_MS;
+  const candidates = [];
+  const seenCandidates = new Set();
+  const roots = windowsFixedDriveRoots();
+  function pushCandidate(dir) {
+    if (!dir) return;
+    const key = path.resolve(dir).toLowerCase();
+    if (seenCandidates.has(key)) return;
+    if (!isSodaOfficialClientDir(dir)) return;
+    seenCandidates.add(key);
+    candidates.push(dir);
+  }
+  function pushNativeModuleCandidate(nativeDir) {
+    if (!isSodaNativeModuleDir(nativeDir)) return;
+    pushCandidate(sodaClientDirFromNativeModuleDir(nativeDir));
+  }
+  for (const root of roots) {
+    if (Date.now() > deadline || candidates.length) break;
+    const queuedDirs = new Set();
+    const urgentQueue = [];
+    const normalQueue = [];
+    let urgentCursor = 0;
+    let normalCursor = 0;
+    function enqueue(dir, urgent) {
+      const key = path.resolve(dir).toLowerCase();
+      if (queuedDirs.has(key)) return;
+      queuedDirs.add(key);
+      (urgent ? urgentQueue : normalQueue).push(dir);
+    }
+    enqueue(root, false);
+    while ((urgentCursor < urgentQueue.length || normalCursor < normalQueue.length) && Date.now() <= deadline && !candidates.length) {
+      const dir = urgentCursor < urgentQueue.length ? urgentQueue[urgentCursor++] : normalQueue[normalCursor++];
+      if (!dir) continue;
+      pushCandidate(dir);
+      pushNativeModuleCandidate(dir);
+      if (candidates.length) break;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch (e) { continue; }
+      const dirs = [];
+      let hasBdticket = false;
+      let hasBdms = false;
+      for (const entry of entries) {
+        const lower = entry.name.toLowerCase();
+        if (entry.isFile()) {
+          if (lower === 'bdticket.node') hasBdticket = true;
+          else if (lower === 'bdms.node') hasBdms = true;
+          continue;
+        }
+        if (!entry.isDirectory()) continue;
+        if (shouldSkipSodaGlobalScanDir(path.join(dir, entry.name), entry.name)) continue;
+        dirs.push(entry.name);
+      }
+      if (hasBdticket && hasBdms) pushNativeModuleCandidate(dir);
+      if (candidates.length) break;
+      dirs.sort((a, b) => sodaScanPriority(a) - sodaScanPriority(b) || a.localeCompare(b));
+      for (const name of dirs) {
+        const child = path.join(dir, name);
+        const lower = name.toLowerCase();
+        if (lower === 'resources') pushCandidate(dir);
+        else if (lower === 'app.asar.unpacked') pushNativeModuleCandidate(child);
+        if (candidates.length) break;
+        enqueue(child, sodaScanPriority(name) <= 1);
+      }
+    }
+  }
+  candidates.sort((a, b) => compareVersionText(path.basename(b), path.basename(a)));
+  return candidates;
+}
+
 function resolveSodaOfficialClientDir() {
   const explicitNode = process.env.SODA_BDTICKET_NODE || process.env.SODA_BDMS_NODE;
   if (explicitNode) {
-    const unpacked = path.dirname(explicitNode);
-    const resources = path.dirname(unpacked);
-    const versionDir = path.dirname(resources);
-    if (fs.existsSync(sodaBdticketNodePath(versionDir)) && fs.existsSync(sodaBdmsNodePath(versionDir))) return versionDir;
+    const versionDir = sodaClientDirFromNativeNodePath(explicitNode);
+    if (isSodaOfficialClientDir(versionDir)) return versionDir;
+  }
+  if (sodaOfficialClientDirCache) {
+    const cachedAge = Date.now() - (sodaOfficialClientDirCache.scannedAt || 0);
+    if (sodaOfficialClientDirCache.clientDir && isSodaOfficialClientDir(sodaOfficialClientDirCache.clientDir)) return sodaOfficialClientDirCache.clientDir;
+    if (!sodaOfficialClientDirCache.clientDir && cachedAge < SODA_CLIENT_NEGATIVE_SCAN_CACHE_MS) return '';
+  }
+  const persistentCache = readSodaClientScanCache();
+  if (persistentCache) {
+    sodaOfficialClientDirCache = { clientDir: persistentCache, scannedAt: Date.now() };
+    return persistentCache;
   }
   const candidates = [];
   for (const root of sodaKnownInstallRoots()) {
     try {
       if (!root || !fs.existsSync(root)) continue;
-      if (fs.existsSync(sodaBdticketNodePath(root)) && fs.existsSync(sodaBdmsNodePath(root))) candidates.push(root);
+      if (isSodaOfficialClientDir(root)) candidates.push(root);
       for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         const dir = path.join(root, entry.name);
-        if (fs.existsSync(sodaBdticketNodePath(dir)) && fs.existsSync(sodaBdmsNodePath(dir))) candidates.push(dir);
+        if (isSodaOfficialClientDir(dir)) candidates.push(dir);
       }
     } catch (e) {}
   }
+  if (!candidates.length) {
+    findSodaClientDirsByGlobalScan().forEach(dir => candidates.push(dir));
+  }
   candidates.sort((a, b) => compareVersionText(path.basename(b), path.basename(a)));
-  return candidates[0] || '';
+  const resolved = candidates[0] || '';
+  sodaOfficialClientDirCache = { clientDir: resolved, scannedAt: Date.now() };
+  if (resolved) writeSodaClientScanCache(resolved);
+  return resolved;
 }
 
 function readSodaBuildId(versionDir) {
@@ -5991,7 +6241,7 @@ const server = http.createServer(async (req, res) => {
 
   if (pn === '/api/update/download') {
     try {
-      const info = await fetchLatestUpdateInfo();
+      const info = await ensureUpdateInstallerDigest(await fetchLatestUpdateInfo());
       const job = startUpdateDownloadJob(info);
       sendJSON(res, job, job.ok ? 200 : 400);
     } catch (err) {
