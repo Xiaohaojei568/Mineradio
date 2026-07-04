@@ -2387,7 +2387,7 @@ let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
 let sodaLoginInfoCache = null;
 let sodaLoginInfoCacheAt = 0;
-let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, error: '' };
+let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, localStateCount: 0, encryptedPrefixes: {}, error: '' };
 let sodaLastLoginProbe = null;
 let sodaOfficialClientDirCache = null;
 let sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
@@ -2401,7 +2401,7 @@ function clearSodaRuntimeCaches(opts) {
   sodaNativeSecurity = null;
   sodaOfficialClientDirCache = null;
   sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
-  sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, error: '' };
+  sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, localStateCount: 0, encryptedPrefixes: {}, error: '' };
   try { if (typeof sodaChromiumKeyCache !== 'undefined') sodaChromiumKeyCache.clear(); } catch (e) {}
   try { if (typeof sodaDpapiCache !== 'undefined') sodaDpapiCache.clear(); } catch (e) {}
   if (opts.removeStateFiles) {
@@ -3189,7 +3189,11 @@ function sodaLocalStateCandidatesForCookieDb(dbPath) {
     if (!parent || parent === dir) break;
     dir = parent;
   }
-  for (const userDataDir of sodaKnownUserDataDirs()) candidates.push(path.join(userDataDir, 'Local State'));
+  const roots = uniqueExistingOrder([sodaUserDataDirFromCookieDb(dbPath)].concat(sodaStaticUserDataDirs()));
+  for (const userDataDir of roots) {
+    candidates.push(path.join(userDataDir, 'Local State'));
+    findFilesByName(userDataDir, 'Local State', 4, 16, candidates);
+  }
   return uniqueExistingOrder(candidates).filter(pathExistsFile);
 }
 
@@ -3224,7 +3228,7 @@ function stripChromiumCookieHostHash(plain, hostKey) {
 
 function decryptChromiumAesCookie(encryptedValue, dbPath, hostKey) {
   const encrypted = bufferFromSqliteBlob(encryptedValue);
-  if (encrypted.length < 3 || !/^v1[01]$/i.test(encrypted.subarray(0, 3).toString('ascii'))) return '';
+  if (encrypted.length < 3 || !/^v(?:1[01]|20)$/i.test(encrypted.subarray(0, 3).toString('ascii'))) return '';
   for (const localStatePath of sodaLocalStateCandidatesForCookieDb(dbPath)) {
     const key = readChromiumOsCryptKey(localStatePath);
     if (!key || key.length !== 32 || encrypted.length <= 31) continue;
@@ -3251,6 +3255,18 @@ function decryptSodaCookieValue(row, dbPath) {
   if (aesValue) return aesValue.trim();
   const dpapiValue = windowsDpapiUnprotect(encrypted);
   return dpapiValue ? stripChromiumCookieHostHash(dpapiValue, row.host_key).toString('utf8').trim() : '';
+}
+
+function sodaEncryptedCookiePrefix(row) {
+  if (!row) return 'empty';
+  const encrypted = row.encrypted_value ? bufferFromSqliteBlob(row.encrypted_value) : bufferFromHex(row.encrypted_value_hex);
+  if (!encrypted.length) return row.value ? 'plain' : 'empty';
+  if (encrypted.length >= 3) {
+    const prefix = encrypted.subarray(0, 3).toString('ascii');
+    if (/^v\d\d$/i.test(prefix)) return prefix.toLowerCase();
+  }
+  if (encrypted.length >= 5 && encrypted.subarray(0, 5).toString('ascii') === 'DPAPI') return 'dpapi';
+  return 'other';
 }
 
 function sodaCookieWhereSql(parameterized) {
@@ -3305,16 +3321,47 @@ function readCookieRowsWithSqliteCli(dbPath) {
   }
 }
 
+function copyFileSharedReadSync(source, dest) {
+  try {
+    fs.copyFileSync(source, dest);
+    return true;
+  } catch (firstErr) {
+    if (process.platform !== 'win32') return false;
+    try {
+      const script = [
+        '& {',
+        'param($src,$dst)',
+        "$ErrorActionPreference='Stop'",
+        "$inputStream=[System.IO.File]::Open($src,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)",
+        'try {',
+        "$outputStream=[System.IO.File]::Open($dst,[System.IO.FileMode]::Create,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)",
+        'try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }',
+        '} finally { $inputStream.Dispose() }',
+        '}',
+      ].join('; ');
+      execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script, source, dest], {
+        encoding: 'utf8',
+        timeout: 5000,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      return pathExistsFile(dest);
+    } catch (e) {
+      return false;
+    }
+  }
+}
+
 function readCookieRowsFromSnapshot(dbPath) {
   let tmpDir = '';
   try {
     if (!pathExistsFile(dbPath)) return null;
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mineradio-soda-cookies-'));
     const tmpDb = path.join(tmpDir, 'Cookies');
-    fs.copyFileSync(dbPath, tmpDb);
-    for (const suffix of ['-wal', '-shm']) {
+    if (!copyFileSharedReadSync(dbPath, tmpDb)) return null;
+    for (const suffix of ['-wal', '-shm', '-journal']) {
       const source = dbPath + suffix;
-      if (pathExistsFile(source)) fs.copyFileSync(source, tmpDb + suffix);
+      if (pathExistsFile(source)) copyFileSharedReadSync(source, tmpDb + suffix);
     }
     return readCookieRowsWithNodeSqlite(tmpDb) || readCookieRowsWithSqliteCli(tmpDb);
   } catch (e) {
@@ -3345,6 +3392,7 @@ function sodaClientDetected(forceScan) {
 function sodaLocalSyncMessage() {
   if (!sodaLastLocalSync.userDataDirs.length) return '\u672a\u627e\u5230\u6c7d\u6c34\u97f3\u4e50\u672c\u673a\u6570\u636e\u76ee\u5f55\uff0c\u8bf7\u5148\u5b89\u88c5\u5e76\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5b8c\u6210\u767b\u5f55';
   if (!sodaLastLocalSync.cookieDbs.length) return '\u5df2\u627e\u5230\u6c7d\u6c34\u97f3\u4e50\u6570\u636e\u76ee\u5f55\uff0c\u4f46\u6ca1\u6709\u53d1\u73b0\u767b\u5f55 Cookie \u6570\u636e\u5e93\uff0c\u8bf7\u5148\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5b8c\u6210\u767b\u5f55';
+  if (sodaLastLocalSync.cookieRows > 0 && sodaLastLocalSync.decryptFailures >= sodaLastLocalSync.cookieRows) return '\u5df2\u627e\u5230\u6c7d\u6c34\u97f3\u4e50\u767b\u5f55 Cookie\uff0c\u4f46\u672c\u673a\u7cfb\u7edf\u6ca1\u6709\u89e3\u5bc6\u6210\u529f\uff1b\u8bf7\u786e\u8ba4 Mineradio \u548c\u6c7d\u6c34\u97f3\u4e50\u4f7f\u7528\u540c\u4e00\u4e2a Windows \u7528\u6237\u542f\u52a8\uff0c\u5e76\u91cd\u65b0\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u540e\u518d\u540c\u6b65';
   if (!sodaLastLocalSync.cookies) return '\u5df2\u627e\u5230\u6c7d\u6c34\u97f3\u4e50 Cookie \u6570\u636e\u5e93\uff0c\u4f46\u6ca1\u6709\u8bfb\u53d6\u5230\u6709\u6548\u767b\u5f55\u4f1a\u8bdd\uff0c\u8bf7\u786e\u8ba4\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u5df2\u767b\u5f55';
   if (!sodaLastLocalSync.clientDir) return '\u5df2\u8bfb\u5230\u6c7d\u6c34\u97f3\u4e50\u767b\u5f55\u6570\u636e\uff0c\u4f46\u672a\u5b9a\u4f4d\u5ba2\u6237\u7aef\u5b89\u88c5\u76ee\u5f55\uff1b\u4e0d\u5f71\u54cd\u767b\u5f55\u540c\u6b65\uff0c\u64ad\u653e\u7b7e\u540d\u4f1a\u7ee7\u7eed\u81ea\u52a8\u5c1d\u8bd5\u68c0\u6d4b';
   return '';
@@ -3353,6 +3401,20 @@ function sodaLocalSyncMessage() {
   if (!sodaLastLocalSync.cookieDbs.length) return '已找到汽水音乐数据目录，但没有发现登录 Cookie 数据库，请先打开汽水音乐客户端完成登录';
   if (!sodaLastLocalSync.cookies) return '已找到汽水音乐 Cookie 数据库，但没有读取到有效登录会话，请确认汽水音乐客户端已登录';
   return '';
+}
+
+function sodaLocalSyncDiagnostics() {
+  return {
+    userDataDirCount: sodaLastLocalSync.userDataDirs.length,
+    cookieDbCount: sodaLastLocalSync.cookieDbs.length,
+    cookieRowCount: sodaLastLocalSync.cookieRows || 0,
+    decryptFailureCount: sodaLastLocalSync.decryptFailures || 0,
+    decryptedCookieCount: sodaLastLocalSync.cookies || 0,
+    localStateCount: sodaLastLocalSync.localStateCount || 0,
+    encryptedPrefixes: sodaLastLocalSync.encryptedPrefixes || {},
+    clientDirDetected: !!sodaLastLocalSync.clientDir,
+    error: sodaLastLocalSync.error || '',
+  };
 }
 
 function sodaLoginDebugSnapshot() {
@@ -3374,6 +3436,8 @@ function sodaLoginDebugSnapshot() {
       cookieRowCount: sodaLastLocalSync.cookieRows || 0,
       decryptFailureCount: sodaLastLocalSync.decryptFailures || 0,
       decryptedCookieCount: sodaLastLocalSync.cookies,
+      localStateCount: sodaLastLocalSync.localStateCount || 0,
+      encryptedPrefixes: sodaLastLocalSync.encryptedPrefixes || {},
       error: sodaLastLocalSync.error || '',
     },
     apiProbe: sodaLastLoginProbe ? {
@@ -3400,10 +3464,22 @@ function readSodaCookieFromClient(opts) {
   let lastError = '';
   let cookieRows = 0;
   let decryptFailures = 0;
+  let localStateCount = 0;
+  const localStateSeen = new Set();
+  const encryptedPrefixes = {};
   for (const dbPath of cookieDbs) {
     try {
+      for (const file of sodaLocalStateCandidatesForCookieDb(dbPath)) {
+        const key = path.resolve(file).toLowerCase();
+        if (!localStateSeen.has(key)) {
+          localStateSeen.add(key);
+          localStateCount++;
+        }
+      }
       for (const row of readSodaCookieRows(dbPath)) {
         cookieRows++;
+        const prefix = sodaEncryptedCookiePrefix(row);
+        encryptedPrefixes[prefix] = (encryptedPrefixes[prefix] || 0) + 1;
         const value = decryptSodaCookieValue(row, dbPath);
         if (!value) decryptFailures++;
         if (value) collectCookiePair(picked, row && row.name, value);
@@ -3423,6 +3499,8 @@ function readSodaCookieFromClient(opts) {
     cookieRows,
     decryptFailures,
     cookies: picked.size,
+    localStateCount,
+    encryptedPrefixes,
     error: lastError,
   };
   return Array.from(picked.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
@@ -3969,6 +4047,7 @@ async function getSodaLoginInfo(opts) {
     const emptyInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: false };
     emptyInfo.clientDetected = sodaClientDetected(false);
     emptyInfo.message = sodaLocalSyncMessage();
+    emptyInfo.diagnostics = sodaLocalSyncDiagnostics();
     sodaLoginInfoCache = { cookie: sodaCookie, info: emptyInfo };
     sodaLoginInfoCacheAt = now;
     return { ...emptyInfo };
@@ -3992,6 +4071,7 @@ async function getSodaLoginInfo(opts) {
         clientDetected: sodaClientDetected(false),
         error: message,
         message,
+        diagnostics: sodaLocalSyncDiagnostics(),
       };
       sodaLoginInfoCache = { cookie: sodaCookie, info: noUserInfo };
       sodaLoginInfoCacheAt = now;
@@ -4039,6 +4119,7 @@ async function getSodaLoginInfo(opts) {
     const errorInfo = { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!sodaCookie, clientDetected: true, error: e.message };
     errorInfo.clientDetected = sodaClientDetected(false);
     errorInfo.message = e.message || sodaLocalSyncMessage();
+    errorInfo.diagnostics = sodaLocalSyncDiagnostics();
     sodaLoginInfoCache = { cookie: sodaCookie, info: errorInfo };
     sodaLoginInfoCacheAt = now;
     return { ...errorInfo };
