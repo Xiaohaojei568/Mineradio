@@ -2337,6 +2337,42 @@ const SODA_APP_NAME = 'luna_pc';
 const SODA_APP_VERSION = process.env.SODA_APP_VERSION || '3.5.1';
 const SODA_VERSION_CODE = process.env.SODA_VERSION_CODE || '30501';
 const SODA_DEFAULT_BUILD_ID = '36.4.0-rs.29.release.main.0';
+const SODA_COOKIE_HOST_PATTERNS = [
+  '%qishui.com%',
+  '%snssdk.com%',
+  '%douyin.com%',
+  '%bytedance.com%',
+  '%iesdouyin.com%',
+  '%amemv.com%',
+];
+const SODA_LOGIN_COOKIE_NAMES = [
+  'sessionid',
+  'sessionid_ss',
+  'sid_tt',
+  'sid_guard',
+  'uid_tt',
+  'uid_tt_ss',
+  'sid_ucp_v1',
+  'ssid_ucp_v1',
+  'passport_csrf_token',
+  'passport_csrf_token_default',
+  'passport_auth_status',
+  'passport_auth_status_ss',
+  'passport_assist_user',
+  'ttwid',
+  'odin_tt',
+  'n_mh',
+  'session_tlb_tag',
+  'has_biz_token',
+  'is_staff_user',
+  'store-region',
+  'store-region-src',
+  'msToken',
+  's_v_web_id',
+  'd_ticket',
+  'multi_sids',
+  'cmpl_token',
+];
 const SODA_PLAYBACK_SESSION_TTL_MS = 10 * 60 * 1000;
 const SODA_LOGIN_INFO_CACHE_MS = 8000;
 const SODA_CLIENT_SCAN_CACHE_FILE = process.env.SODA_CLIENT_SCAN_CACHE_FILE || path.join(mineradioUserDataDir(__dirname), 'soda-client-dir.json');
@@ -3217,6 +3253,23 @@ function decryptSodaCookieValue(row, dbPath) {
   return dpapiValue ? stripChromiumCookieHostHash(dpapiValue, row.host_key).toString('utf8').trim() : '';
 }
 
+function sodaCookieWhereSql(parameterized) {
+  const hostClauses = SODA_COOKIE_HOST_PATTERNS.map(() => 'host_key like ?').join(' or ');
+  const nameClauses = SODA_LOGIN_COOKIE_NAMES.map(() => 'name = ?').join(' or ');
+  if (parameterized) return `(${hostClauses} or ${nameClauses})`;
+  const hostSql = SODA_COOKIE_HOST_PATTERNS.map(sqliteStringLiteral).map(value => `host_key like ${value}`).join(' or ');
+  const nameSql = SODA_LOGIN_COOKIE_NAMES.map(sqliteStringLiteral).map(value => `name = ${value}`).join(' or ');
+  return `(${hostSql} or ${nameSql})`;
+}
+
+function sodaCookieQueryParams() {
+  return SODA_COOKIE_HOST_PATTERNS.concat(SODA_LOGIN_COOKIE_NAMES);
+}
+
+function sqliteStringLiteral(value) {
+  return "'" + String(value || '').replace(/'/g, "''") + "'";
+}
+
 function readCookieRowsWithNodeSqlite(dbPath) {
   try {
     const sqlite = require('node:sqlite');
@@ -3224,8 +3277,8 @@ function readCookieRowsWithNodeSqlite(dbPath) {
     const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
     try {
       return db.prepare(
-        "select host_key,name,value,encrypted_value,path,last_update_utc,creation_utc from cookies where host_key like ? and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc"
-      ).all('%qishui.com%');
+        `select host_key,name,value,encrypted_value,path,last_update_utc,creation_utc from cookies where ${sodaCookieWhereSql(true)} and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc`
+      ).all(...sodaCookieQueryParams());
     } finally {
       try { db.close(); } catch (e) {}
     }
@@ -3236,7 +3289,7 @@ function readCookieRowsWithNodeSqlite(dbPath) {
 
 function readCookieRowsWithSqliteCli(dbPath) {
   try {
-    const sql = "select host_key,name,value,hex(encrypted_value),path,last_update_utc,creation_utc from cookies where host_key like '%qishui.com%' and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc";
+    const sql = `select host_key,name,value,hex(encrypted_value),path,last_update_utc,creation_utc from cookies where ${sodaCookieWhereSql(false)} and (value != '' or length(encrypted_value) > 0) order by last_update_utc asc, creation_utc asc`;
     const out = execFileSync('sqlite3', ['-separator', '\t', dbPath, sql], {
       encoding: 'utf8',
       timeout: 3000,
@@ -3252,8 +3305,35 @@ function readCookieRowsWithSqliteCli(dbPath) {
   }
 }
 
+function readCookieRowsFromSnapshot(dbPath) {
+  let tmpDir = '';
+  try {
+    if (!pathExistsFile(dbPath)) return null;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mineradio-soda-cookies-'));
+    const tmpDb = path.join(tmpDir, 'Cookies');
+    fs.copyFileSync(dbPath, tmpDb);
+    for (const suffix of ['-wal', '-shm']) {
+      const source = dbPath + suffix;
+      if (pathExistsFile(source)) fs.copyFileSync(source, tmpDb + suffix);
+    }
+    return readCookieRowsWithNodeSqlite(tmpDb) || readCookieRowsWithSqliteCli(tmpDb);
+  } catch (e) {
+    return null;
+  } finally {
+    if (tmpDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+    }
+  }
+}
+
 function readSodaCookieRows(dbPath) {
-  return readCookieRowsWithNodeSqlite(dbPath) || readCookieRowsWithSqliteCli(dbPath) || [];
+  const direct = readCookieRowsWithNodeSqlite(dbPath);
+  if (direct && direct.length) return direct;
+  const cli = readCookieRowsWithSqliteCli(dbPath);
+  if (cli && cli.length) return cli;
+  const snapshot = readCookieRowsFromSnapshot(dbPath);
+  if (snapshot && snapshot.length) return snapshot;
+  return direct || cli || snapshot || [];
 }
 
 function sodaClientDetected(forceScan) {
@@ -3326,7 +3406,7 @@ function readSodaCookieFromClient(opts) {
         cookieRows++;
         const value = decryptSodaCookieValue(row, dbPath);
         if (!value) decryptFailures++;
-        collectCookiePair(picked, row && row.name, value);
+        if (value) collectCookiePair(picked, row && row.name, value);
       }
     } catch (e) {
       lastError = e.message || String(e);
