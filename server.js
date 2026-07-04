@@ -65,23 +65,28 @@ const { execFileSync, spawn } = require('child_process');
 const { once } = require('events');
 const { fileURLToPath } = require('url');
 const { analyzePodcastDjStream, analyzePodcastDjIntro } = require('./dj-analyzer');
+const { readPackageInfo, readUpdateConfig } = require('./server/config/app-config');
+const { resolveStaticFile } = require('./server/static-files');
+const { collectCookiePair, normalizeCookieHeader, rawCookieFallback } = require('./server/utils/cookies');
+const { serveStatic, sendJSON } = require('./server/utils/http');
+const { mineradioUserDataDir, writePrivateStateFile } = require('./server/utils/paths');
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const COOKIE_FILE = process.env.COOKIE_FILE || path.join(__dirname, '.cookie');
 const QQ_COOKIE_FILE = process.env.QQ_COOKIE_FILE || path.join(__dirname, '.qq-cookie');
-const SODA_COOKIE_FILE = process.env.SODA_COOKIE_FILE || path.join(mineradioUserDataDir(), '.soda-cookie');
+const SODA_COOKIE_FILE = process.env.SODA_COOKIE_FILE || path.join(mineradioUserDataDir(__dirname), '.soda-cookie');
 const UPDATE_WORK_DIR = process.env.MINERADIO_UPDATE_DIR || path.join(__dirname, 'updates');
 const UPDATE_DOWNLOAD_DIR = process.env.MINERADIO_UPDATE_DOWNLOAD_DIR || path.join(UPDATE_WORK_DIR, 'downloads');
 const UPDATE_PATCH_BACKUP_DIR = process.env.MINERADIO_PATCH_BACKUP_DIR || path.join(UPDATE_WORK_DIR, 'backups', 'patches');
 const BEATMAP_CACHE_DIR = process.env.MINERADIO_BEAT_CACHE_DIR || 'D:\\MineradioCache\\beatmaps';
-const APP_PACKAGE = readPackageInfo();
+const APP_PACKAGE = readPackageInfo(__dirname);
 const APP_VERSION = process.env.MINERADIO_VERSION || APP_PACKAGE.version || '0.9.11';
 const UPDATE_CONFIG = readUpdateConfig(APP_PACKAGE);
 const PATCH_MAX_BYTES = 12 * 1024 * 1024;
-const PATCH_ALLOWED_ROOTS = new Set(['public', 'desktop', 'build']);
-const PATCH_ALLOWED_FILES = new Set(['server.js', 'dj-analyzer.js', 'package.json', 'package-lock.json']);
+const PATCH_ALLOWED_ROOTS = new Set(['public', 'desktop', 'build', 'server', 'renderer-dist', 'src']);
+const PATCH_ALLOWED_FILES = new Set(['server.js', 'dj-analyzer.js', 'package.json', 'package-lock.json', 'vite.config.js', 'index.html']);
 const UPDATE_FALLBACK_NOTES = [
   '电影镜头节奏更松',
   '音源失败自动换源',
@@ -100,20 +105,6 @@ const WEATHER_DEFAULT_LOCATION = {
 };
 
 const updateDownloadJobs = new Map();
-
-function mineradioUserDataDir() {
-  if (process.env.MINERADIO_USER_DATA_DIR) return process.env.MINERADIO_USER_DATA_DIR;
-  if (process.env.APPDATA) return path.join(process.env.APPDATA, 'Mineradio');
-  if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'Mineradio');
-  return __dirname;
-}
-
-function writePrivateStateFile(file, text) {
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, text);
-  } catch (e) {}
-}
 
 let ffmpegBinaryPath = process.env.FFMPEG_PATH || '';
 try {
@@ -143,68 +134,7 @@ function applySystemCertificateAuthorities() {
 
 applySystemCertificateAuthorities();
 
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js':   'application/javascript',
-  '.css':  'text/css',
-  '.json': 'application/json',
-  '.png':  'image/png',
-  '.jpg':  'image/jpeg',
-  '.ico':  'image/x-icon',
-  '.svg':  'image/svg+xml',
-};
-
 // ---------- Cookie 持久化 ----------
-const COOKIE_ATTRIBUTE_NAMES = new Set(['path', 'domain', 'expires', 'max-age', 'samesite', 'secure', 'httponly']);
-function collectCookiePair(picked, key, value) {
-  key = String(key || '').trim();
-  if (!key || COOKIE_ATTRIBUTE_NAMES.has(key.toLowerCase())) return;
-  if (value === null || value === undefined) return;
-  picked.set(key, String(value).trim());
-}
-function collectCookieInput(input, picked) {
-  if (input === null || input === undefined) return;
-  if (Array.isArray(input)) {
-    input.forEach(item => collectCookieInput(item, picked));
-    return;
-  }
-  if (typeof input === 'object') {
-    if (input.name && Object.prototype.hasOwnProperty.call(input, 'value')) {
-      collectCookiePair(picked, input.name, input.value);
-      return;
-    }
-    Object.keys(input).forEach(key => {
-      const value = input[key];
-      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) {
-        collectCookiePair(picked, key, value.value);
-      } else if (typeof value !== 'object') {
-        collectCookiePair(picked, key, value);
-      }
-    });
-    return;
-  }
-  String(input).split(/\r?\n/).forEach(line => {
-    line.split(';').forEach(part => {
-      const raw = String(part || '').trim();
-      const idx = raw.indexOf('=');
-      if (idx <= 0) return;
-      collectCookiePair(picked, raw.slice(0, idx), raw.slice(idx + 1));
-    });
-  });
-}
-function normalizeCookieHeader(input) {
-  const picked = new Map();
-  collectCookieInput(input, picked);
-  return Array.from(picked.entries())
-    .filter(([key, value]) => key && value != null && String(value) !== '')
-    .map(([key, value]) => `${key}=${value}`)
-    .join('; ');
-}
-function rawCookieFallback(input) {
-  if (typeof input === 'string') return input.trim();
-  if (Array.isArray(input) && input.every(item => typeof item === 'string')) return input.join('; ').trim();
-  return '';
-}
 let userCookie = '';
 try { if (fs.existsSync(COOKIE_FILE)) userCookie = fs.readFileSync(COOKIE_FILE, 'utf8').trim(); }
 catch (e) { userCookie = ''; }
@@ -230,113 +160,6 @@ function saveSodaCookie(c) {
 }
 
 // ---------- 工具 ----------
-function serveStatic(res, filePath) {
-  const ext = path.extname(filePath);
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not Found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain' });
-    res.end(data);
-  });
-}
-function sendJSON(res, data, status) {
-  res.writeHead(status || 200, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0',
-  });
-  res.end(JSON.stringify(data));
-}
-function readPackageInfo() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8');
-    return JSON.parse(raw);
-  } catch (e) {
-    return {};
-  }
-}
-function parseGitHubRepository(input) {
-  const raw = String(input || '').trim();
-  if (!raw) return null;
-  const direct = raw.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (direct) return { owner: direct[1], repo: direct[2].replace(/\.git$/i, '') };
-  const github = raw.match(/github\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[#/?].*)?$/i);
-  if (github) return { owner: github[1], repo: github[2].replace(/\.git$/i, '') };
-  return null;
-}
-function parseGiteeRepository(input) {
-  const raw = String(input || '').trim();
-  if (!raw) return null;
-  const direct = raw.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (direct) return { owner: direct[1], repo: direct[2].replace(/\.git$/i, '') };
-  const gitee = raw.match(/gitee\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[#/?].*)?$/i);
-  if (gitee) return { owner: gitee[1], repo: gitee[2].replace(/\.git$/i, '') };
-  return null;
-}
-function readUpdateConfig(pkg) {
-  const local = (pkg && pkg.mineradio && pkg.mineradio.update) || {};
-  const giteeLocal = local.gitee || {};
-  const repoHint = process.env.MINERADIO_UPDATE_REPOSITORY
-    || process.env.GITHUB_REPOSITORY
-    || local.repository
-    || local.github
-    || (pkg && pkg.repository && (pkg.repository.url || pkg.repository))
-    || '';
-  const parsed = parseGitHubRepository(repoHint) || {};
-  const owner = process.env.MINERADIO_UPDATE_OWNER || local.owner || parsed.owner || '';
-  const repo = process.env.MINERADIO_UPDATE_REPO || local.repo || parsed.repo || '';
-  const giteeHint = process.env.MINERADIO_GITEE_REPOSITORY
-    || process.env.MINERADIO_UPDATE_GITEE_REPOSITORY
-    || giteeLocal.repository
-    || giteeLocal.url
-    || local.giteeRepository
-    || (typeof local.gitee === 'string' ? local.gitee : '')
-    || '';
-  const parsedGitee = parseGiteeRepository(giteeHint) || {};
-  const giteeOwner = process.env.MINERADIO_GITEE_OWNER || process.env.MINERADIO_UPDATE_GITEE_OWNER || giteeLocal.owner || parsedGitee.owner || '';
-  const giteeRepo = process.env.MINERADIO_GITEE_REPO || process.env.MINERADIO_UPDATE_GITEE_REPO || giteeLocal.repo || parsedGitee.repo || '';
-  return {
-    provider: local.provider || 'github',
-    owner,
-    repo,
-    configured: !!(owner && repo),
-    gitee: {
-      owner: giteeOwner,
-      repo: giteeRepo,
-      configured: !!(giteeOwner && giteeRepo),
-      prefer: giteeLocal.prefer !== false,
-    },
-    preview: local.preview !== false,
-    preferMirrors: local.preferMirrors !== false,
-    mirrors: readUpdateMirrors(local),
-    manifest: process.env.MINERADIO_UPDATE_MANIFEST
-      || process.env.MINERADIO_UPDATE_MANIFEST_URL
-      || process.env.MINERADIO_UPDATE_MANIFEST_FILE
-      || '',
-  };
-}
-function parseUpdateMirrorList(value) {
-  if (Array.isArray(value)) return value;
-  return String(value || '').split(/[\n,;]/);
-}
-function readUpdateMirrors(local) {
-  const envMirrors = process.env.MINERADIO_UPDATE_MIRRORS || process.env.MINERADIO_UPDATE_MIRROR || '';
-  const raw = envMirrors
-    ? parseUpdateMirrorList(envMirrors)
-    : parseUpdateMirrorList(local.mirrors || local.downloadMirrors || []);
-  const seen = new Set();
-  const mirrors = [];
-  raw.forEach(item => {
-    const url = String(item || '').trim();
-    if (!/^https?:\/\//i.test(url)) return;
-    const key = url.replace(/\/+$/, '').toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    mirrors.push(url);
-  });
-  return mirrors.slice(0, 6);
-}
 function normalizeDigest(value, algorithm) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -471,12 +294,14 @@ function pickReleaseAsset(assets, latestVersion) {
     || list[0];
   if (!preferred) return null;
   const digest = assetDigestInfo(preferred);
-  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, preferred.browser_download_url || '', preferred.name || ''));
+  const sourceUrl = preferred.browser_download_url || preferred.download_url || preferred.downloadUrl || preferred.url || '';
+  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, sourceUrl, preferred.name || ''));
+  const downloadUrl = sourceUrl || (candidates[0] && candidates[0].url) || '';
   return {
     name: preferred.name || '',
     size: preferred.size || 0,
     contentType: preferred.content_type || '',
-    downloadUrl: preferred.browser_download_url || '',
+    downloadUrl,
     downloadUrls: publicDownloadUrls(candidates),
     sha256: digest.sha256 || '',
     sha512: digest.sha512 || '',
@@ -504,12 +329,14 @@ function pickPatchAsset(assets, currentVersion, latestVersion) {
   }) || list.find(a => /\.(patch\.json|patch)$/i.test(a && a.name || ''));
   if (!preferred) return null;
   const digest = assetDigestInfo(preferred);
-  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, preferred.browser_download_url || '', preferred.name || ''));
+  const sourceUrl = preferred.browser_download_url || preferred.download_url || preferred.downloadUrl || preferred.url || '';
+  const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion || APP_VERSION, sourceUrl, preferred.name || ''));
+  const downloadUrl = sourceUrl || (candidates[0] && candidates[0].url) || '';
   return {
     name: preferred.name || '',
     size: preferred.size || 0,
     contentType: preferred.content_type || '',
-    downloadUrl: preferred.browser_download_url || '',
+    downloadUrl,
     downloadUrls: publicDownloadUrls(candidates),
     sha256: digest.sha256 || '',
     sha512: digest.sha512 || '',
@@ -776,6 +603,20 @@ function giteeReleaseDownloadUrl(version, fileName) {
   const encodedName = String(fileName || '').split('/').map(part => encodeURIComponent(part)).join('/');
   return `https://gitee.com/${encodedOwner}/${encodedRepo}/releases/download/${tag}/${encodedName}`;
 }
+function primaryReleaseDownloadUrl(version, fileName) {
+  if (UPDATE_CONFIG.provider === 'gitee') {
+    return giteeReleaseDownloadUrl(version, fileName) || githubReleaseDownloadUrl(version, fileName);
+  }
+  return githubReleaseDownloadUrl(version, fileName);
+}
+function releaseHtmlUrl(version) {
+  const latestVersion = normalizeVersion(version || APP_VERSION);
+  if (UPDATE_CONFIG.provider === 'gitee') {
+    const cfg = UPDATE_CONFIG.gitee || {};
+    if (cfg.configured) return `https://gitee.com/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases/tag/v${latestVersion}`;
+  }
+  return `https://github.com/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/tag/v${latestVersion}`;
+}
 function releaseAssetDownloadUrls(version, primaryUrl, assetName) {
   const name = assetName || updateAssetNameFromUrl(primaryUrl);
   return [giteeReleaseDownloadUrl(version, name), primaryUrl].filter(Boolean);
@@ -786,7 +627,7 @@ function parseLatestYmlUpdateInfo(text, reason) {
   const sha512 = normalizeDigest(yamlScalar(text, 'sha512'), 'sha512');
   const size = Number(yamlScalar(text, 'size') || 0) || 0;
   const releaseDate = yamlScalar(text, 'releaseDate');
-  const downloadUrl = githubReleaseDownloadUrl(latestVersion, assetPath);
+  const downloadUrl = primaryReleaseDownloadUrl(latestVersion, assetPath);
   const candidates = uniqueDownloadCandidates(releaseAssetDownloadUrls(latestVersion, downloadUrl, assetPath));
   const asset = {
     name: updateAssetNameFromUrl(downloadUrl) || assetPath,
@@ -804,13 +645,13 @@ function parseLatestYmlUpdateInfo(text, reason) {
     currentVersion: APP_VERSION,
     latestVersion,
     release: {
-      tagName: 'v' + latestVersion,
-      name: 'Mineradio v' + latestVersion,
-      version: latestVersion,
-      publishedAt: releaseDate,
-      htmlUrl: `https://github.com/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/tag/v${latestVersion}`,
-      downloadUrl,
-      asset,
+        tagName: 'v' + latestVersion,
+        name: 'Mineradio v' + latestVersion,
+        version: latestVersion,
+        publishedAt: releaseDate,
+        htmlUrl: releaseHtmlUrl(latestVersion),
+        downloadUrl,
+        asset,
       patch: null,
       patchAvailable: false,
       summary: '发现新版本，已启用备用更新线路。',
@@ -820,15 +661,108 @@ function parseLatestYmlUpdateInfo(text, reason) {
     reason: reason || '',
   };
 }
-async function fetchLatestYmlUpdateInfo(reason, timeoutMs) {
-  if (!UPDATE_CONFIG.configured || UPDATE_CONFIG.provider !== 'github') throw updateError('UPDATE_REPOSITORY_NOT_CONFIGURED');
-  const latestYmlUrl = `https://github.com/${encodeURIComponent(UPDATE_CONFIG.owner)}/${encodeURIComponent(UPDATE_CONFIG.repo)}/releases/latest/download/latest.yml`;
+async function fetchLatestYmlUpdateInfo(reason, timeoutMs, version) {
+  let latestYmlUrl = '';
+  const targetVersion = normalizeVersion(version || '');
+  if (UPDATE_CONFIG.provider === 'gitee') {
+    const cfg = UPDATE_CONFIG.gitee || {};
+    if (!cfg.configured) throw updateError('UPDATE_REPOSITORY_NOT_CONFIGURED');
+    const tag = targetVersion ? 'v' + targetVersion : 'latest';
+    latestYmlUrl = `https://gitee.com/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases/download/${tag}/latest.yml`;
+  } else {
+    if (!UPDATE_CONFIG.configured || UPDATE_CONFIG.provider !== 'github') throw updateError('UPDATE_REPOSITORY_NOT_CONFIGURED');
+    latestYmlUrl = `https://github.com/${encodeURIComponent(UPDATE_CONFIG.owner)}/${encodeURIComponent(UPDATE_CONFIG.repo)}/releases/latest/download/latest.yml`;
+  }
   const candidates = uniqueDownloadCandidates(latestYmlUrl);
   const result = await fetchTextFromCandidates(candidates, timeoutMs || 6500);
   return parseLatestYmlUpdateInfo(result.text, reason);
 }
+function normalizeGiteeReleaseAssets(release, version) {
+  const lists = [
+    release && release.attach_files,
+    release && release.assets,
+    release && release.attachments,
+  ].filter(Array.isArray);
+  return lists.flat().map(item => {
+    const sourceUrl = item && (item.browser_download_url || item.download_url || item.downloadUrl || item.url || '');
+    const name = item && (item.name || item.file_name || item.filename || updateAssetNameFromUrl(sourceUrl)) || '';
+    return {
+      name,
+      size: Number(item && (item.size || item.file_size || item.filesize) || 0) || 0,
+      content_type: item && (item.content_type || item.contentType || '') || '',
+      browser_download_url: sourceUrl || (name ? giteeReleaseDownloadUrl(version || APP_VERSION, name) : ''),
+      sha256: item && item.sha256 || '',
+      sha512: item && item.sha512 || '',
+      digest: item && item.digest || '',
+    };
+  }).filter(item => item.name || item.browser_download_url);
+}
+async function fetchGiteeLatestUpdateInfo() {
+  const cfg = UPDATE_CONFIG.gitee || {};
+  if (!cfg.configured) return localUpdateFallback('Gitee repository not configured', { configured: false });
+  const apiUrl = `https://gitee.com/api/v5/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8500);
+  try {
+    const resp = await fetch(apiUrl, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': `Mineradio/${APP_VERSION}`,
+        'Accept': 'application/json',
+      },
+    });
+    if (!resp.ok) {
+      try { return await fetchLatestYmlUpdateInfo('Gitee Releases ' + resp.status); }
+      catch (_) { return localUpdateFallback('Gitee Releases ' + resp.status, { configured: true }); }
+    }
+    const data = await resp.json();
+    const releases = Array.isArray(data) ? data : (data ? [data] : []);
+    const release = releases.find(item => item && item.prerelease !== true) || releases[0] || null;
+    if (!release) return localUpdateFallback('Gitee release empty', { configured: true });
+    const latestVersion = normalizeVersion(release.tag_name || release.name || APP_VERSION) || APP_VERSION;
+    const assets = normalizeGiteeReleaseAssets(release, latestVersion);
+    const asset = pickReleaseAsset(assets, latestVersion);
+    const patch = pickPatchAsset(assets, APP_VERSION, latestVersion);
+    const notes = extractReleaseNotes(release.body || release.description).length
+      ? extractReleaseNotes(release.body || release.description)
+      : UPDATE_FALLBACK_NOTES;
+    const info = {
+      configured: true,
+      preview: false,
+      updateAvailable: compareVersions(latestVersion, APP_VERSION) > 0,
+      currentVersion: APP_VERSION,
+      latestVersion,
+      release: {
+        tagName: release.tag_name || ('v' + latestVersion),
+        name: release.name || ('Mineradio v' + latestVersion),
+        version: latestVersion,
+        publishedAt: release.published_at || release.created_at || release.updated_at || '',
+        htmlUrl: release.html_url || releaseHtmlUrl(latestVersion),
+        downloadUrl: asset ? asset.downloadUrl : '',
+        asset,
+        patch,
+        patchAvailable: !!(patch && patch.downloadUrl && compareVersions(latestVersion, APP_VERSION) > 0),
+        summary: notes[0] || '发现新版本，建议更新。',
+        notes,
+      },
+      source: 'gitee',
+    };
+    try {
+      return mergeLatestYmlInstallerDigest(info, await fetchLatestYmlUpdateInfo('installer digest', 5000, latestVersion));
+    } catch (_) {
+      return info;
+    }
+  } catch (err) {
+    const reason = err && err.message || 'Gitee update check failed';
+    try { return await fetchLatestYmlUpdateInfo(reason); }
+    catch (fallbackErr) { return localUpdateFallback((fallbackErr && fallbackErr.message) || reason, { configured: true }); }
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function fetchLatestUpdateInfo() {
   if (UPDATE_CONFIG.manifest) return fetchManifestUpdateInfo(UPDATE_CONFIG.manifest);
+  if (UPDATE_CONFIG.provider === 'gitee') return fetchGiteeLatestUpdateInfo();
   if (!UPDATE_CONFIG.configured || UPDATE_CONFIG.provider !== 'github') return localUpdateFallback();
   const apiUrl = `https://api.github.com/repos/${encodeURIComponent(UPDATE_CONFIG.owner)}/${encodeURIComponent(UPDATE_CONFIG.repo)}/releases/latest`;
   const controller = new AbortController();
@@ -2386,7 +2320,7 @@ const SODA_VERSION_CODE = process.env.SODA_VERSION_CODE || '30501';
 const SODA_DEFAULT_BUILD_ID = '36.4.0-rs.29.release.main.0';
 const SODA_PLAYBACK_SESSION_TTL_MS = 10 * 60 * 1000;
 const SODA_LOGIN_INFO_CACHE_MS = 8000;
-const SODA_CLIENT_SCAN_CACHE_FILE = process.env.SODA_CLIENT_SCAN_CACHE_FILE || path.join(mineradioUserDataDir(), 'soda-client-dir.json');
+const SODA_CLIENT_SCAN_CACHE_FILE = process.env.SODA_CLIENT_SCAN_CACHE_FILE || path.join(mineradioUserDataDir(__dirname), 'soda-client-dir.json');
 const SODA_CLIENT_SCAN_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 const SODA_CLIENT_NEGATIVE_SCAN_CACHE_MS = 60 * 1000;
 const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(3000, Math.min(30000, Number(process.env.SODA_CLIENT_GLOBAL_SCAN_MS) || 12000));
@@ -2398,7 +2332,8 @@ let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
 let sodaLoginInfoCache = null;
 let sodaLoginInfoCacheAt = 0;
-let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
+let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, error: '' };
+let sodaLastLoginProbe = null;
 let sodaOfficialClientDirCache = null;
 let sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
 const sodaPlaybackSessions = new Map();
@@ -2411,7 +2346,7 @@ function clearSodaRuntimeCaches(opts) {
   sodaNativeSecurity = null;
   sodaOfficialClientDirCache = null;
   sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
-  sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookies: 0, error: '' };
+  sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieDbs: [], cookieRows: 0, decryptFailures: 0, cookies: 0, error: '' };
   try { if (typeof sodaChromiumKeyCache !== 'undefined') sodaChromiumKeyCache.clear(); } catch (e) {}
   try { if (typeof sodaDpapiCache !== 'undefined') sodaDpapiCache.clear(); } catch (e) {}
   if (opts.removeStateFiles) {
@@ -3346,6 +3281,39 @@ function sodaLocalSyncMessage() {
   return '';
 }
 
+function sodaLoginDebugSnapshot() {
+  const cookieObj = sodaCookieObject();
+  const probeBody = sodaLastLoginProbe && sodaLastLoginProbe.body;
+  const probeInfo = sodaLastLoginProbe && sodaLastLoginProbe.info;
+  const probeData = probeBody && probeBody.data && typeof probeBody.data === 'object' ? probeBody.data : null;
+  return {
+    hasCookie: !!sodaCookie,
+    cookieLength: sodaCookie ? sodaCookie.length : 0,
+    cookieNames: Object.keys(cookieObj).sort(),
+    hasLoginTicket: sodaCookieHasLoginTicket(cookieObj),
+    clientDetected: sodaClientDetected(false),
+    lastLocalSync: {
+      checkedAt: sodaLastLocalSync.checkedAt || 0,
+      clientDirDetected: !!sodaLastLocalSync.clientDir,
+      userDataDirCount: sodaLastLocalSync.userDataDirs.length,
+      cookieDbCount: sodaLastLocalSync.cookieDbs.length,
+      cookieRowCount: sodaLastLocalSync.cookieRows || 0,
+      decryptFailureCount: sodaLastLocalSync.decryptFailures || 0,
+      decryptedCookieCount: sodaLastLocalSync.cookies,
+      error: sodaLastLocalSync.error || '',
+    },
+    apiProbe: sodaLastLoginProbe ? {
+      ok: !!sodaLastLoginProbe.ok,
+      error: sodaLastLoginProbe.error || '',
+      code: probeBody ? normalizeApiCode(probeBody) : 0,
+      message: probeBody ? sodaApiErrorMessage(probeBody, '') : '',
+      topKeys: probeBody ? Object.keys(probeBody).slice(0, 24) : [],
+      dataKeys: probeData ? Object.keys(probeData).slice(0, 24) : [],
+      userInfoKeys: probeInfo ? Object.keys(probeInfo).slice(0, 24) : [],
+    } : null,
+  };
+}
+
 function readSodaCookieFromClient(opts) {
   opts = opts || {};
   let userDataDirs = sodaKnownUserDataDirs({ discover: false }).filter(pathExistsDir);
@@ -3356,10 +3324,15 @@ function readSodaCookieFromClient(opts) {
   }
   const picked = new Map();
   let lastError = '';
+  let cookieRows = 0;
+  let decryptFailures = 0;
   for (const dbPath of cookieDbs) {
     try {
       for (const row of readSodaCookieRows(dbPath)) {
-        collectCookiePair(picked, row && row.name, decryptSodaCookieValue(row, dbPath));
+        cookieRows++;
+        const value = decryptSodaCookieValue(row, dbPath);
+        if (!value) decryptFailures++;
+        collectCookiePair(picked, row && row.name, value);
       }
     } catch (e) {
       lastError = e.message || String(e);
@@ -3373,6 +3346,8 @@ function readSodaCookieFromClient(opts) {
     clientDir: clientDir || '',
     userDataDirs,
     cookieDbs,
+    cookieRows,
+    decryptFailures,
     cookies: picked.size,
     error: lastError,
   };
@@ -3572,8 +3547,46 @@ async function sodaApiRequest(apiPath, params, opts) {
 function sodaApiErrorMessage(body, fallback) {
   return (body && body.status_info && (body.status_info.status_msg || body.status_info.message))
     || (body && (body.message || body.msg || body.error))
+    || (body && body.data && (body.data.message || body.data.msg || body.data.error))
     || fallback
     || '';
+}
+
+function firstObjectWithAnyKey(list, keys) {
+  for (const item of list) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (keys.some(key => item[key] !== undefined && item[key] !== null && String(item[key]) !== '')) return item;
+  }
+  return null;
+}
+
+function sodaLoginUserInfoFromBody(body) {
+  const data = body && body.data && typeof body.data === 'object' ? body.data : {};
+  return firstObjectWithAnyKey([
+    body && body.my_info,
+    body && body.user,
+    body && body.user_info,
+    body && body.profile,
+    data.my_info,
+    data.user,
+    data.user_info,
+    data.profile,
+    data.account,
+    data,
+  ], ['id', 'id_str', 'user_id', 'user_id_str', 'uid', 'uid_str', 'userId', 'user_id_str', 'nickname', 'name', 'avatar', 'avatar_url']) || {};
+}
+
+function sodaLoginUserId(info, body) {
+  const data = body && body.data && typeof body.data === 'object' ? body.data : {};
+  const sources = [info || {}, body || {}, data || {}];
+  const keys = ['id', 'id_str', 'user_id', 'user_id_str', 'uid', 'uid_str', 'userId', 'userID'];
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = source && source[key];
+      if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+    }
+  }
+  return '';
 }
 
 function isSodaKrcText(text) {
@@ -3888,8 +3901,28 @@ async function getSodaLoginInfo(opts) {
   }
   try {
     const body = await sodaApiRequest('/luna/pc/me', {}, { syncCookie: false, security: false, noClientScan: true });
-    const info = body.my_info || body.user || body.data || {};
-    const id = String(info.id || info.user_id || info.uid || '');
+    const info = sodaLoginUserInfoFromBody(body);
+    sodaLastLoginProbe = { ok: true, body, info, checkedAt: Date.now(), error: '' };
+    const id = sodaLoginUserId(info, body);
+    if (!id) {
+      const message = sodaApiErrorMessage(body, '汽水接口没有返回用户信息，登录票据可能已过期或接口字段发生变化');
+      const noUserInfo = {
+        provider: 'soda',
+        loggedIn: false,
+        vipType: 0,
+        vipLevel: 'none',
+        isVip: false,
+        isSvip: false,
+        vipLabel: '无VIP',
+        hasCookie: true,
+        clientDetected: sodaClientDetected(false),
+        error: message,
+        message,
+      };
+      sodaLoginInfoCache = { cookie: sodaCookie, info: noUserInfo };
+      sodaLoginInfoCacheAt = now;
+      return { ...noUserInfo };
+    }
     const cachedVipLevel = readSodaCachedVipLevel(id);
     const vip = normalizeSodaVip(info, body, cachedVipLevel);
     const result = {
@@ -3906,6 +3939,7 @@ async function getSodaLoginInfo(opts) {
     sodaLoginInfoCacheAt = now;
     return { ...result };
   } catch (e) {
+    sodaLastLoginProbe = { ok: false, body: null, info: null, checkedAt: Date.now(), error: e.message || String(e) };
     if (!opts.sync && hasSavedLoginTicket) {
       const staleInfo = {
         provider: 'soda',
@@ -4831,14 +4865,29 @@ async function reverseWeatherLocation(lat, lon) {
     err.statusCode = 400;
     throw err;
   }
+  const fallback = {
+    provider: 'coordinate',
+    city: '当前位置',
+    region: '',
+    country: '',
+    latitude,
+    longitude,
+    timezone: 'auto',
+    fallback: true,
+  };
   const u = new URL(WEATHER_REVERSE_LOCATION_URL);
   u.searchParams.set('latitude', String(latitude));
   u.searchParams.set('longitude', String(longitude));
   u.searchParams.set('localityLanguage', 'zh');
-  const body = await requestJson(u.toString(), {
-    headers: { 'User-Agent': UA },
-    rejectUnauthorized: false,
-  });
+  let body = null;
+  try {
+    body = await requestJson(u.toString(), {
+      headers: { 'User-Agent': UA },
+      rejectUnauthorized: false,
+    });
+  } catch (e) {
+    return fallback;
+  }
   const city = compactWeatherCityName(body && (body.city || body.locality || body.principalSubdivision));
   const region = compactWeatherCityName(body && body.principalSubdivision);
   return {
@@ -6982,8 +7031,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const sync = url.searchParams.get('sync') === '1' || url.searchParams.get('sync') === 'true';
       const quick = url.searchParams.get('quick') === '1' || url.searchParams.get('quick') === 'true';
+      const debug = url.searchParams.get('debug') === '1' || url.searchParams.get('debug') === 'true';
       if (sync) sodaAutoSyncEnabled = true;
       const info = await getSodaLoginInfo({ sync, skipLocalSync: quick });
+      if (debug) info.debug = sodaLoginDebugSnapshot();
       sendJSON(res, info);
     } catch (err) {
       console.error('[SodaLoginStatus]', err);
@@ -7789,9 +7840,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  let filePath = pn === '/' ? '/index.html' : pn;
-  filePath = path.join(__dirname, 'public', filePath);
-  serveStatic(res, filePath);
+  serveStatic(res, resolveStaticFile(__dirname, pn));
 });
 
 server.listen(PORT, HOST, () => {

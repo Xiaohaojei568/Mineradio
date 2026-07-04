@@ -8,7 +8,7 @@ on:
       tag:
         description: Release tag to upload assets to
         required: true
-        default: v1.1.1
+        default: v1.0.0
 
 permissions:
   contents: write
@@ -16,15 +16,11 @@ permissions:
 jobs:
   mac:
     name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-26-intel
-            arch: x64
-          - os: macos-26
-            arch: arm64
+        arch: [x64, arm64]
 
     steps:
       - name: Checkout release source
@@ -46,7 +42,7 @@ jobs:
       - name: Build macOS package
         run: npm run build:mac -- --${{ matrix.arch }} --publish never
 
-      - name: Upload release assets
+      - name: Upload GitHub release assets
         run: |
           gh release upload "$RELEASE_TAG" \
             dist/Mineradio-*-Mac-${{ matrix.arch }}.dmg \
