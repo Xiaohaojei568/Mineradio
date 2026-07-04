@@ -2422,26 +2422,14 @@ function sodaExplicitUserDataDirs() {
   return uniqueExistingOrder(dirs);
 }
 
-// Fast-path Electron user-data folder names under APPDATA/LOCALAPPDATA.
-// This is not an install-dir whitelist; arbitrary install paths are handled separately.
-function sodaCommonUserDataFolderNames() {
-  return ['SodaMusic', 'Soda Music', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
-}
-
 function sodaDefaultUserDataDirs() {
   const dirs = [];
   function pushDir(dir) {
     if (dir) dirs.push(dir);
   }
-  for (const root of [process.env.APPDATA, process.env.LOCALAPPDATA]) {
-    if (!root) continue;
-    for (const name of sodaCommonUserDataFolderNames()) pushDir(path.join(root, name));
-  }
+  if (process.env.APPDATA) pushDir(path.join(process.env.APPDATA, 'SodaMusic'));
   if (process.env.USERPROFILE) {
-    for (const name of sodaCommonUserDataFolderNames()) {
-      pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', name));
-      pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Local', name));
-    }
+    pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'SodaMusic'));
   }
   return uniqueExistingOrder(dirs);
 }
@@ -2470,10 +2458,6 @@ function sodaUserDataDir() {
   }) || dirs[0] || '';
 }
 
-function sodaInstallNameCandidates() {
-  return ['Soda Music', 'SodaMusic', 'luna_pc', 'LunaPC', 'Luna', 'qishui', 'qsyy', '\u6c7d\u6c34\u97f3\u4e50'];
-}
-
 function readSodaRegistryInstallRoots() {
   if (process.platform !== 'win32') return [];
   const roots = [];
@@ -2482,7 +2466,7 @@ function readSodaRegistryInstallRoots() {
     'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
     'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
   ];
-  const nameRe = /soda|qishui|luna|\u6c7d\u6c34/i;
+  const nameRe = /sodamusic/i;
   function flush(values) {
     const displayName = values.DisplayName || values.Publisher || '';
     const combined = [displayName, values.InstallLocation, values.DisplayIcon, values.UninstallString].filter(Boolean).join(' ');
@@ -2522,7 +2506,7 @@ function readSodaRegistryInstallRoots() {
 function readRunningSodaProcessRoots() {
   if (process.platform !== 'win32') return [];
   try {
-    const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process | Where-Object { $_.ProcessName -match 'soda|luna|qishui|\u6c7d\u6c34' -or $_.Path -match 'soda|luna|qishui|\u6c7d\u6c34' } | ForEach-Object { $_.Path }";
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-Process | Where-Object { $_.ProcessName -match 'sodamusic' -or $_.Path -match 'SodaMusic' } | ForEach-Object { $_.Path }";
     const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       encoding: 'utf8',
       timeout: 2500,
@@ -2542,15 +2526,14 @@ function sodaKnownInstallRoots() {
   }
   pushRoot(process.env.SODA_INSTALL_DIR);
   pushRoot(process.env.SODA_CLIENT_DIR);
+  const installName = 'SodaMusic';
   if (process.env.LOCALAPPDATA) {
-    for (const name of sodaInstallNameCandidates()) {
-      pushRoot(path.join(process.env.LOCALAPPDATA, 'Programs', name));
-      pushRoot(path.join(process.env.LOCALAPPDATA, name));
-    }
+    pushRoot(path.join(process.env.LOCALAPPDATA, 'Programs', installName));
+    pushRoot(path.join(process.env.LOCALAPPDATA, installName));
   }
   for (const programRoot of [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)']]) {
     if (!programRoot) continue;
-    for (const name of sodaInstallNameCandidates()) pushRoot(path.join(programRoot, name));
+    pushRoot(path.join(programRoot, installName));
   }
   readSodaRegistryInstallRoots().forEach(pushRoot);
   readRunningSodaProcessRoots().forEach(pushRoot);
@@ -2670,7 +2653,7 @@ function shouldSkipSodaGlobalScanDir(dir, name) {
 
 function sodaScanPriority(name) {
   const lower = String(name || '').toLowerCase();
-  if (/soda|qishui|luna|qsyy|\u6c7d\u6c34/.test(lower)) return 0;
+  if (lower === 'sodamusic') return 0;
   if (lower === 'resources') return 1;
   if (/program|install|app|music|soft|software|\u8f6f\u4ef6|\u97f3\u4e50/.test(lower)) return 2;
   return 5;
@@ -2983,12 +2966,6 @@ function sodaUserDataScanRoots() {
   }
   pushRoot(process.env.SODA_USER_DATA_ROOT);
   for (const dir of sodaStaticUserDataDirs()) pushRoot(dir);
-  pushRoot(process.env.APPDATA);
-  pushRoot(process.env.LOCALAPPDATA);
-  if (process.env.USERPROFILE) {
-    pushRoot(path.join(process.env.USERPROFILE, 'AppData', 'Roaming'));
-    pushRoot(path.join(process.env.USERPROFILE, 'AppData', 'Local'));
-  }
   const clientDir = sodaOfficialClientDirCache && sodaOfficialClientDirCache.clientDir || '';
   if (clientDir) {
     pushRoot(clientDir);
@@ -3000,7 +2977,7 @@ function sodaUserDataScanRoots() {
 
 function sodaUserDataPathScore(filePath) {
   const lower = String(filePath || '').toLowerCase();
-  if (/soda|qishui|luna|qsyy|\u6c7d\u6c34/.test(lower)) return 0;
+  if (/[\\/]appdata[\\/]roaming[\\/]sodamusic[\\/]/.test(lower) || /[\\/]appdata[\\/]roaming[\\/]sodamusic$/.test(lower)) return 0;
   if (/bytedance|douyin|electron|appdata[\\/]local[\\/]programs/.test(lower)) return 1;
   if (/chrome|edge|brave|vivaldi|firefox|browser/.test(lower)) return 6;
   return 3;
@@ -3107,8 +3084,6 @@ function sodaCookieDbCandidates(opts) {
     ['Network', 'Cookies'],
     ['Default', 'Network', 'Cookies'],
     ['User Data', 'Default', 'Network', 'Cookies'],
-    ['Partitions', 'persist_luna', 'Network', 'Cookies'],
-    ['Partitions', 'persist:soda', 'Network', 'Cookies'],
   ];
   const candidates = [];
   if (includeDiscovery) sodaDiscoveredCookieDbs().forEach(dbPath => candidates.push(dbPath));
