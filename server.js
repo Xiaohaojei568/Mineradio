@@ -603,7 +603,11 @@ function giteeReleaseDownloadUrl(version, fileName) {
   const encodedName = String(fileName || '').split('/').map(part => encodeURIComponent(part)).join('/');
   return `https://gitee.com/${encodedOwner}/${encodedRepo}/releases/download/${tag}/${encodedName}`;
 }
+function isHttpUpdateUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
 function primaryReleaseDownloadUrl(version, fileName) {
+  if (isHttpUpdateUrl(fileName)) return String(fileName || '').trim();
   if (UPDATE_CONFIG.provider === 'gitee') {
     return giteeReleaseDownloadUrl(version, fileName) || githubReleaseDownloadUrl(version, fileName);
   }
@@ -619,7 +623,9 @@ function releaseHtmlUrl(version) {
 }
 function releaseAssetDownloadUrls(version, primaryUrl, assetName) {
   const name = assetName || updateAssetNameFromUrl(primaryUrl);
-  return [giteeReleaseDownloadUrl(version, name), primaryUrl].filter(Boolean);
+  const directUrl = String(primaryUrl || '').trim();
+  if (isHttpUpdateUrl(directUrl) && !isGiteeReleaseUrl(directUrl)) return [directUrl];
+  return [giteeReleaseDownloadUrl(version, name), directUrl].filter(Boolean);
 }
 function parseLatestYmlUpdateInfo(text, reason) {
   const latestVersion = normalizeVersion(yamlScalar(text, 'version') || APP_VERSION) || APP_VERSION;
@@ -720,12 +726,25 @@ async function fetchGiteeLatestUpdateInfo() {
     const release = releases.find(item => item && item.prerelease !== true) || releases[0] || null;
     if (!release) return localUpdateFallback('Gitee release empty', { configured: true });
     const latestVersion = normalizeVersion(release.tag_name || release.name || APP_VERSION) || APP_VERSION;
-    const assets = normalizeGiteeReleaseAssets(release, latestVersion);
-    const asset = pickReleaseAsset(assets, latestVersion);
-    const patch = pickPatchAsset(assets, APP_VERSION, latestVersion);
     const notes = extractReleaseNotes(release.body || release.description).length
       ? extractReleaseNotes(release.body || release.description)
       : UPDATE_FALLBACK_NOTES;
+    try {
+      const ymlInfo = await fetchLatestYmlUpdateInfo('gitee latest.yml', 5000, latestVersion);
+      if (ymlInfo && ymlInfo.release && ymlInfo.release.asset && ymlInfo.release.asset.downloadUrl) {
+        ymlInfo.release.tagName = release.tag_name || ('v' + latestVersion);
+        ymlInfo.release.name = release.name || ('Mineradio v' + latestVersion);
+        ymlInfo.release.publishedAt = release.published_at || release.created_at || release.updated_at || ymlInfo.release.publishedAt || '';
+        ymlInfo.release.htmlUrl = release.html_url || releaseHtmlUrl(latestVersion);
+        ymlInfo.release.summary = notes[0] || ymlInfo.release.summary;
+        ymlInfo.release.notes = notes;
+        ymlInfo.source = 'gitee-latest-yml';
+        return ymlInfo;
+      }
+    } catch (_) {}
+    const assets = normalizeGiteeReleaseAssets(release, latestVersion);
+    const asset = pickReleaseAsset(assets, latestVersion);
+    const patch = pickPatchAsset(assets, APP_VERSION, latestVersion);
     const info = {
       configured: true,
       preview: false,
