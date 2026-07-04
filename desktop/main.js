@@ -202,21 +202,32 @@ function isLocalMineradioUrl(url) {
   }
 }
 
+function isAllowedLocalPermission(permission, details) {
+  if (permission === 'geolocation') return true;
+  if (permission === 'camera' || permission === 'videoCapture') return true;
+  if (permission === 'media') {
+    const mediaTypes = details && Array.isArray(details.mediaTypes) ? details.mediaTypes : [];
+    return !mediaTypes.length || mediaTypes.includes('video');
+  }
+  return false;
+}
+
 function configureAppPermissions() {
   try {
     const defaultSession = session.defaultSession;
     if (!defaultSession) return;
     defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
       const requestingUrl = details && details.requestingUrl || webContents && webContents.getURL && webContents.getURL() || '';
-      if (permission === 'geolocation' && isLocalMineradioUrl(requestingUrl)) {
+      if (isLocalMineradioUrl(requestingUrl) && isAllowedLocalPermission(permission, details)) {
         callback(true);
         return;
       }
       callback(false);
     });
     if (typeof defaultSession.setPermissionCheckHandler === 'function') {
-      defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-        return permission === 'geolocation' && isLocalMineradioUrl(requestingOrigin || (webContents && webContents.getURL && webContents.getURL()));
+      defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+        return isLocalMineradioUrl(requestingOrigin || (webContents && webContents.getURL && webContents.getURL()))
+          && isAllowedLocalPermission(permission, details);
       });
     }
   } catch (e) {

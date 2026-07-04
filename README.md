@@ -1,104 +1,131 @@
-﻿# Mineradio
+# Mineradio
 
-![Mineradio 鏆楀満瑙嗚椤礭(./docs/assets/readme/cinema-beat-smoke.png)
+![Mineradio 暗场视觉页](./docs/assets/readme/cinema-beat-smoke.png)
 
-Mineradio 鏄竴娆鹃潰鍚?Windows 妗岄潰绔殑娌夋蹈寮忛煶涔愭挱鏀惧櫒銆傚畠鎶婃悳绱㈡挱鏀俱€佹瓕鍗曘€佹瓕璇嶈垶鍙般€佸疄鏃惰瘎璁烘皵娉″脊骞曘€佺矑瀛愯瑙夈€?D 姝屽崟鏋躲€佸ぉ姘旂數鍙板拰 DIY 瑙嗚鎺у埗鍙版斁鍦ㄥ悓涓€涓闈綋楠岄噷锛岀洰鏍囨槸璁╂棩甯稿惉姝屾洿鍍忚繘鍏ヤ竴涓彲璋冩牎鐨勭浜洪煶涔愮┖闂淬€?
-椤圭洰浠撳簱锛歔Xiaohaojei568/Mineradio](https://github.com/Xiaohaojei568/Mineradio)
+Mineradio 是一款面向 Windows / macOS 桌面端的沉浸式音乐播放器。它把搜索播放、歌单、歌词舞台、实时评论气泡弹幕、粒子视觉、3D 歌单架、天气电台和 DIY 视觉控制台放在同一个桌面体验里，让日常听歌更像进入一个可调校的私人音乐空间。
 
-## 褰撳墠鐗堟湰
+项目仓库：[Xiaohaojei568/Mineradio](https://github.com/Xiaohaojei568/Mineradio)
 
-褰撳墠鐗堟湰锛歚1.0.0`
+## 当前版本
 
-鐘舵€侊細Windows 绾噣瀹夎鍙戝竷鐗堛€?
-> 瀹夊叏鎻愮ず锛歚v1.0.10` 鍙婃洿鏃╂棫瀹夎鍖呬笉鍐嶅缓璁户缁畨瑁呮垨浼犳挱銆傝浣跨敤褰撳墠 Release 涓殑 `Mineradio-1.0.0-Setup.exe` 杩涜瀹夎銆?
-## 涓嬭浇瀹夎
+当前版本：`1.0.0`
 
-GitHub Releases 涓嬭浇鍏ュ彛锛?
-[鎵撳紑 Mineradio Releases](https://github.com/Xiaohaojei568/Mineradio/releases)
+状态：Vue + Vite 前端、Node 本地服务、Electron 桌面发布版。
 
-涓嬭浇瀹夎鏃惰浼樺厛閫夋嫨锛?
+## 下载安装
+
+推荐从 GitHub Release 下载完整安装包：
+
+[打开 Mineradio v1.0.0 Release](https://github.com/Xiaohaojei568/Mineradio/releases/tag/v1.0.0)
+
+Windows 用户下载：
+
 ```text
 Mineradio-1.0.0-Setup.exe
 ```
 
-涓嶅缓璁妸涓嬮潰杩欎簺鏂囦欢褰撲綔瀹夎鍖呬娇鐢細
+macOS Apple Silicon 芯片，也就是 M1 / M2 / M3 / M4，下载：
 
-- `Source code`
-- `.blockmap`
+```text
+Mineradio-1.0.0-Mac-arm64.dmg
+```
+
+macOS Intel 芯片下载：
+
+```text
+Mineradio-1.0.0-Mac-x64.dmg
+```
+
+不要把下面这些文件当安装包：
+
 - `latest.yml`
+- `.blockmap`
+- `Source code`
 - `win-unpacked`
 
-濡傛灉娴忚鍣ㄣ€乄indows Defender 鎴?SmartScreen 鎻愮ず椋庨櫓锛岃鍏堢‘璁ゆ枃浠舵潵鑷湰椤圭洰 Release 椤甸潰锛屾枃浠跺悕涓?`Mineradio-1.0.0-Setup.exe`銆傚皬浼?Electron 妗岄潰杞欢鍜屾湭绛惧悕瀹夎鍖呮湁鏃朵細瑙﹀彂绯荤粺鎻愮ず锛岀‘璁ゆ潵婧愭棤璇悗鍙湪 SmartScreen 涓€夋嫨鈥滄洿澶氫俊鎭€濆啀缁х画杩愯銆?
-## 鏍稿績鍔熻兘
+如果 Windows Defender 或 SmartScreen 提示风险，请先确认文件来自上面的 GitHub Release 页面，再选择“更多信息” -> “仍要运行”。
 
-- Windows Electron 妗岄潰鎾斁鍣紝鏀寔瀹夎鍖呫€佹闈㈠揩鎹锋柟寮忓拰鏈湴鍚姩銆?- 缃戞槗浜戦煶涔愪笌 QQ 闊充箰鎼滅储銆佺櫥褰曠姸鎬併€佹瓕鍗曘€佹瓕鏇叉挱鏀捐緟鍔╂帴鍏ャ€?- QQ 闊充箰瀹炴椂璇勮璇诲彇锛岃瑙夐〉鏀寔姘旀场寮瑰箷灞曠ず銆?- 姘旀场寮瑰箷鏀寔寮€鍏虫帶鍒躲€佹偓鍋滄殏鍋溿€佺埍蹇冪偣璧炪€佺偣鍑婚瑙堝拰鍥炲鍏ュ彛銆?- Home 棣栭〉鍖呭惈澶╂皵鐢靛彴銆佹瘡鏃ユ帹鑽愩€佺浜虹數鍙般€佺户缁惉銆佸惉姝岀敾鍍忓拰鎴戠殑姝屽崟鍏ュ彛銆?- Open-Meteo 澶╂皵鐢靛彴锛屽彲鏍规嵁鍩庡競銆佸ぉ姘斿拰 mood 鐢熸垚鏇磋创鍚堝満鏅殑鎾斁闃熷垪銆?- 鎾斁鎬佽瑙夊寘鍚瓕璇嶈垶鍙般€佸皝闈㈢矑瀛愩€佺數褰遍暅澶淬€佽妭濂忚仈鍔ㄥ拰澶氱瑙嗚棰勮銆?- DIY 瑙嗚鎺у埗鍙版敮鎸侀璁俱€佸瑙傘€佹瓕璇嶃€佸姩鎬佸拰楂樼骇璁剧疆銆?- 3D 姝屽崟鏋舵敮鎸佸彸閿敜璧枫€佹瓕鍗曟祻瑙堛€佽鎯呴〉銆佹粴杞€夋嫨鍜岄潤鎬佸父椹汇€?- 鏀寔鑷畾涔変笓杈戝皝闈笂浼犮€佽鍓€佽嚜瀹氫箟姝岃瘝鍜屾瓕璇嶄綅缃皟鑺傘€?- 妗岄潰姝岃瘝銆佸悗鍙版€ц兘绛栫暐銆佺敾璐ㄦ。浣嶅拰绐楀彛鐘舵€佷紭鍖栥€?- GitHub Releases 鏇存柊妫€娴嬩笌瀹夎鍖呬笅杞藉叆鍙ｃ€?
-## 浣跨敤璇存槑
+## 核心功能
 
-瀹夎瀹屾垚鍚庤繍琛?`Mineradio` 鍗冲彲杩涘叆鎾斁鍣ㄣ€傞娆″惎鍔ㄤ細浣跨敤鍐呯疆榛樿瑙嗚鍙傛暟锛屽寘鍚?`emily` 瑙嗚棰勮銆佺矑瀛愩€佹瓕璇嶃€侀珮浜壊銆佸彂鍏夎壊鍜?3D 姝屽崟鏋剁瓑榛樿閰嶇疆銆?
-瑙嗚椤电殑姘旀场寮瑰箷鍙湪瑙嗚鍖哄煙鏄剧ず銆傚鏋滃湪 DIY 鎺у埗鍙扮殑澶栬椤垫墦寮€姘旀场寮瑰箷寮€鍏筹紝鍒囧洖瑙嗚椤靛悗寮瑰箷浼氱户缁仮澶嶆樉绀恒€?
-绗笁鏂归煶涔愬钩鍙拌兘鍔涗緷璧栫敤鎴疯嚜宸辩殑璐﹀彿鐘舵€佸拰骞冲彴鎺ュ彛鍙敤鎬с€傞儴鍒嗘瓕鏇插彲鑳藉彈鐗堟潈銆佷細鍛樻潈闄愩€佸湴鍖烘垨骞冲彴绛栫暐褰卞搷锛屾棤娉曚繚璇佹墍鏈夋瓕鏇查兘鍙互鎾斁銆?
-## 寮€鍙戣繍琛?
+- Windows / macOS Electron 桌面播放器。
+- 网易云音乐、QQ 音乐、汽水音乐搜索与播放辅助接入。
+- 网易云 / QQ / 汽水登录状态与歌单同步。
+- 播放态视觉包含歌词舞台、封面粒子、电影镜头、节奏联动和多种视觉预设。
+- DIY 视觉控制台支持预设、外观、歌词、动态、高级设置和 3D 歌单架调整。
+- 摄像头手势控制支持手掌推开粒子、捏合旋转、握拳收束。
+- Home 首页包含天气电台、每日推荐、私人电台、继续听、听歌画像和我的歌单入口。
+- 支持自定义专辑封面上传、裁剪、自定义歌词和歌词位置调节。
+- 应用内更新检查走 Gitee Release，完整安装包下载走 GitHub Release。
+
+## 使用说明
+
+安装完成后运行 `Mineradio` 即可进入播放器。
+
+汽水音乐登录同步会读取当前 Windows 用户下的本机客户端会话：
+
+```text
+%APPDATA%\SodaMusic
+```
+
+如果汽水音乐已经登录但 Mineradio 未同步成功，请重新打开汽水音乐客户端后再点“读取本机登录”。
+
+摄像头手势控制只在用户主动点击“手势触碰”后开启。应用会自动允许本地页面访问摄像头；如果 Windows 系统隐私设置全局禁用了摄像头，需要在系统设置中允许桌面应用访问摄像头。
+
+第三方音乐平台能力依赖用户自己的账号状态和平台接口可用性。部分歌曲可能受版权、会员权限、地区或平台策略影响，无法保证所有歌曲都可以播放。
+
+## 开发运行
+
 ```bash
 npm install
 npm start
 ```
 
-鐢熸垚 Windows 瀹夎鍖咃細
+生成 Windows 安装包：
 
 ```bash
 npm run build:win
 ```
 
-鐢熸垚浠呰В鍖呯洰褰曪細
+生成 macOS 安装包：
+
+```bash
+npm run build:mac
+```
+
+生成仅解包目录：
 
 ```bash
 npm run build:win:dir
 ```
 
-鏋勫缓浜х墿浣嶄簬锛?
+构建产物位于：
+
 ```text
 dist/
 ```
 
-甯歌浜х墿鍖呮嫭锛?
-- `Mineradio-1.0.0-Setup.exe`
-- `Mineradio-1.0.0-Setup.exe.blockmap`
-- `latest.yml`
-- `win-unpacked/`
-
-## 椤圭洰缁撴瀯
+## 项目结构
 
 ```text
 Mineradio/
-鈹溾攢 public/
-鈹? 鈹溾攢 index.html        # 涓?UI銆丆SS銆佹瓕璇嶃€佺矑瀛愩€?D 姝屽崟鏋躲€佽瑙夋帶鍒跺彴
-鈹? 鈹斺攢 vendor/           # 鏈湴鍓嶇渚濊禆
-鈹溾攢 desktop/             # Electron main/preload
-鈹溾攢 build/               # 鎵撳寘璧勬簮涓庡畨瑁呭櫒鑴氭湰
-鈹溾攢 docs/                # 椤圭洰鏂囨。銆佽瑙夎褰曘€佸彂甯冭鏄?鈹溾攢 server.js            # 鏈湴 API銆侀煶涔愭簮銆佹洿鏂版鏌?鈹溾攢 dj-analyzer.js       # 鑺傚涓庨煶棰戝垎鏋?鈹溾攢 package.json         # 鐗堟湰鍙枫€佹瀯寤哄懡浠ゃ€乪lectron-builder 閰嶇疆
-鈹斺攢 CHANGELOG.md         # 鏇存柊鏃ュ織
+├─ src/                 # Vue 前端源码
+├─ public/              # 静态资源和兼容入口
+├─ desktop/             # Electron main / preload
+├─ server/              # Node 后端模块
+├─ build/               # 打包资源和发布脚本
+├─ docs/                # 项目文档
+├─ server.js            # 本地 API 和音乐源入口
+├─ dj-analyzer.js       # 节奏与音频分析
+├─ package.json         # 版本号、构建命令、electron-builder 配置
+└─ README.md
 ```
 
-## 鏇存柊鏈哄埗
+## 更新说明
 
-Mineradio 浼氶€氳繃 GitHub Releases 妫€娴嬫柊鐗堟湰銆傝繙绔増鏈珮浜庢湰鍦扮増鏈椂锛岃蒋浠跺唴鏇存柊鍏ュ彛浼氬睍绀?Release 淇℃伅锛屽苟涓嬭浇瀵瑰簲瀹夎鍖呭埌鏈湴鐢ㄦ埛鏁版嵁鐩綍锛屽啀浜ょ敱鐢ㄦ埛纭瀹夎銆?
-褰撳墠椤圭洰 Release 鍦板潃锛?
+应用内更新入口：
+
 ```text
-https://github.com/Xiaohaojei568/Mineradio/releases
+https://gitee.com/xiao-majie/mineradio/releases/download/v1.0.0/latest.yml
 ```
 
-## 绗笁鏂归煶涔愬钩鍙拌鏄?
-Mineradio 涓嶆槸缃戞槗浜戦煶涔愩€丵Q 闊充箰鎴栦换浣曠涓夋柟闊充箰骞冲彴鐨勫畼鏂瑰鎴风锛屼篃涓嶉毝灞炰簬瀵瑰簲骞冲彴銆?
-椤圭洰涓殑绗笁鏂瑰钩鍙版帴鍏ヤ粎鐢ㄤ簬涓汉瀛︿範銆佹湰鍦板鎴风浣撻獙鍜岀敤鎴疯嚜鏈夎处鍙风殑鎾斁杈呭姪銆傝閬靛畧瀵瑰簲骞冲彴鐨勭敤鎴峰崗璁€佺増鏉冭鍒欏拰浼氬憳鏉冪泭瑙勫垯銆傞」鐩笉鎻愪緵缁曡繃浠樿垂銆佺粫杩囦細鍛樸€佺牬瑙ｉ煶璐ㄦ垨閲嶆柊鍒嗗彂闊充箰鍐呭鐨勮兘鍔涖€?
-## 鐢ㄦ埛鏁版嵁涓庨殣绉?
-鐧诲綍 Cookie銆佹悳绱㈠巻鍙层€佽嚜瀹氫箟灏侀潰銆佽嚜瀹氫箟姝岃瘝銆佽妭濂忓垎鏋愮紦瀛樺拰瑙嗚璁剧疆绛夋暟鎹簲鍙繚瀛樺湪鏈満鐢ㄦ埛鏁版嵁鐩綍鎴栨祻瑙堝櫒鏈湴瀛樺偍涓紝涓嶅簲鎻愪氦鍒颁粨搴撱€?
-鏇村璇存槑瑙?[PRIVACY.md](./PRIVACY.md)銆?
-## 浣滆€呮敮鎸?
-濡傛灉 Mineradio 闄綘澶氬惉浜嗕竴棣栨瓕锛屼篃娆㈣繋鏀寔浣滆€呯户缁淮鎶よ繖涓皬鎾斁鍣ㄣ€?
-[鏌ョ湅鏀寔璇存槑](./docs/SUPPORT.md)
-
-![Mineradio 浣滆€呮敮鎸佹捣鎶(./docs/assets/support/mineradio-author-support-poster.png?v=20260702-flex)
-
-## 璁稿彲璇?
-鏈」鐩噰鐢?GPL-3.0 鎺堟潈锛岃瑙?[LICENSE](./LICENSE)銆?
-Mineradio 鍚嶇О銆丩ogo銆佺晫闈㈣瑙夎璁′笌鍘熷垱瑙嗚琛ㄨ揪褰掗」鐩綔鑰呮墍鏈夛紱绗笁鏂逛緷璧栧拰绗笁鏂规湇鍔″垎鍒伒寰叾鍚勮嚜鎺堟潈涓庢湇鍔℃潯娆俱€?
+Gitee 社区版 Release 附件单文件有大小限制，所以 Gitee 只放更新检查用的小文件。完整 Windows / macOS 安装包请从 GitHub Release 下载。
