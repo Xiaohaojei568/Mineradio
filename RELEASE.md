@@ -1,6 +1,30 @@
-Mineradio 1.1.0
+# Mineradio 1.0.0
 
-- 修复汽水音乐客户端 Cookie 数据库被占用时无法同步登录的问题。
-- 自动同步汽水音乐登录时补充 Cookie 快照与 Local State 兼容读取。
-- 允许本地桌面端在手势控制中正常申请摄像头权限。
-- 保持应用内更新走 Gitee Release，完整安装包继续由 GitHub Release 提供。
+## 发布说明
+
+- Windows 安装包已优化到 100 MB 以下，可以上传到 Gitee Release。
+- 应用内更新检查和安装包下载优先走 Gitee Release。
+- GitHub Release 保留为备用下载源。
+- 现有播放、登录同步、歌词、视觉效果和桌面端功能保持不变。
+
+## 下载地址
+
+Gitee Release：
+
+https://gitee.com/xiao-majie/mineradio/releases/tag/v1.0.0
+
+GitHub Release：
+
+https://github.com/Xiaohaojei568/Mineradio/releases/tag/v1.0.0
+
+## Windows 安装包
+
+```text
+Mineradio-1.0.0-Setup.exe
+```
+
+应用内更新入口：
+
+```text
+https://gitee.com/xiao-majie/mineradio/releases/download/v1.0.0/latest.yml
+```

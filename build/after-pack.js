@@ -40,6 +40,18 @@ function resolveRcedit(projectDir) {
   return hit;
 }
 
+function removeIfExists(filePath) {
+  try {
+    if (fs.existsSync(filePath)) fs.rmSync(filePath, { recursive: true, force: true });
+  } catch (e) {
+    console.warn(`  could not remove ${filePath}: ${e.message}`);
+  }
+}
+
+function removePackagedAppPath(appOutDir, relativePath) {
+  removeIfExists(path.join(appOutDir, 'resources', 'app', ...relativePath.split('/')));
+}
+
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return;
 
@@ -63,4 +75,31 @@ module.exports = async function afterPack(context) {
     '--set-file-version', version,
     '--set-product-version', version
   ], { stdio: 'inherit' });
+
+  removeIfExists(path.join(context.appOutDir, 'LICENSES.chromium.html'));
+  removeIfExists(path.join(context.appOutDir, 'LICENSE.electron.txt'));
+
+  [
+    'dxcompiler.dll',
+    'dxil.dll',
+    'vk_swiftshader.dll',
+    'vk_swiftshader_icd.json',
+    'vulkan-1.dll'
+  ].forEach(function(fileName) {
+    removeIfExists(path.join(context.appOutDir, fileName));
+  });
+
+  [
+    'node_modules/axios/dist/axios.js',
+    'node_modules/axios/dist/axios.min.js',
+    'node_modules/axios/dist/browser',
+    'node_modules/axios/dist/esm',
+    'node_modules/node-forge/dist',
+    'node_modules/node-forge/flash',
+    'node_modules/pngjs/browser.js',
+    'node_modules/source-map/dist',
+    'node_modules/@tootallnate/quickjs-emscripten/c'
+  ].forEach(function(relativePath) {
+    removePackagedAppPath(context.appOutDir, relativePath);
+  });
 };

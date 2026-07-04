@@ -1,7 +1,7 @@
 {
   "name": "mineradio",
   "productName": "Mineradio",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "沉浸式音乐播放器，融合天气电台、歌词舞台、粒子视觉和 3D 歌单架。",
   "author": "Mineradio",
   "main": "desktop/main.js",
@@ -30,23 +30,34 @@
       "en-US"
     ],
     "toolsets": {
-      "winCodeSign": "1.1.0"
+      "winCodeSign": "1.0.0"
     },
     "files": [
       "desktop/**/*",
       "server/**/*",
-      "src/**/*",
       "renderer-dist/**/*",
-      "public/**/*",
       "build/icon.ico",
       "server.js",
       "dj-analyzer.js",
-      "vite.config.js",
       "package.json",
-      "!public/index.*.html",
-      "public/index.html",
+      "!**/node_modules/**/{test,tests,__tests__,coverage,docs,doc,example,examples,benchmark,benchmarks}/**",
+      "!**/node_modules/**/*.{map,ts,tsx,flow,md,markdown}",
+      "!**/node_modules/**/*.{d.cts,d.mts,cts,mts,c,h,cc,cpp,gyp,mk,sh,bat,cmd,tsbuildinfo}",
+      "!**/node_modules/**/*~",
+      "!**/node_modules/**/{README,README.*,CHANGELOG,CHANGELOG.*,HISTORY,HISTORY.*,LICENSE,LICENSE.*,LICENCE,LICENCE.*,NOTICE,NOTICE.*}",
+      "!**/node_modules/**/{.github,.vscode}/**",
       "!node_modules/gsap/**/*",
+      "!node_modules/axios/dist/axios.js",
+      "!node_modules/axios/dist/axios.min.js",
+      "!node_modules/axios/dist/browser/**/*",
+      "!node_modules/axios/dist/esm/**/*",
+      "!node_modules/node-forge/dist/**/*",
+      "!node_modules/node-forge/flash/**/*",
+      "!node_modules/pngjs/browser.js",
+      "!node_modules/source-map/dist/**/*",
+      "!node_modules/@tootallnate/quickjs-emscripten/c/**/*",
       "!node_modules/xml2js/lib/xml2js.bc.js",
+      "!node_modules/NeteaseCloudMusicApi/data/deviceid.txt",
       "!node_modules/NeteaseCloudMusicApi/public/**/*"
     ],
     "asar": false,
@@ -96,6 +107,7 @@
       "uninstallerSidebar": "build/installerSidebar.bmp",
       "installerHeader": "build/installerHeader.bmp",
       "include": "build/installer.nsh",
+      "differentialPackage": false,
       "artifactName": "Mineradio-${version}-Setup.${ext}"
     },
     "publish": [

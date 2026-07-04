@@ -266,6 +266,25 @@ function compareVersions(a, b) {
   }
   return 0;
 }
+function releaseVersionValue(release) {
+  return normalizeVersion(release && (release.tag_name || release.name || release.version) || '');
+}
+function releaseTimeValue(release) {
+  const raw = release && (release.published_at || release.created_at || release.updated_at) || '';
+  const time = Date.parse(raw);
+  return Number.isFinite(time) ? time : 0;
+}
+function selectLatestStableRelease(releases) {
+  const list = (Array.isArray(releases) ? releases : [])
+    .filter(item => item && item.prerelease !== true && item.draft !== true);
+  const candidates = list.length ? list : (Array.isArray(releases) ? releases.filter(Boolean) : []);
+  candidates.sort((a, b) => {
+    const byVersion = compareVersions(releaseVersionValue(b), releaseVersionValue(a));
+    if (byVersion) return byVersion;
+    return releaseTimeValue(b) - releaseTimeValue(a);
+  });
+  return candidates[0] || null;
+}
 function cleanReleaseLine(line) {
   return String(line || '')
     .replace(/^\s*#{1,6}\s*/, '')
@@ -625,7 +644,7 @@ function releaseAssetDownloadUrls(version, primaryUrl, assetName) {
   const name = assetName || updateAssetNameFromUrl(primaryUrl);
   const directUrl = String(primaryUrl || '').trim();
   if (isHttpUpdateUrl(directUrl) && !isGiteeReleaseUrl(directUrl)) return [directUrl];
-  return [giteeReleaseDownloadUrl(version, name), directUrl].filter(Boolean);
+  return [giteeReleaseDownloadUrl(version, name), directUrl, githubReleaseDownloadUrl(version, name)].filter(Boolean);
 }
 function parseLatestYmlUpdateInfo(text, reason) {
   const latestVersion = normalizeVersion(yamlScalar(text, 'version') || APP_VERSION) || APP_VERSION;
@@ -723,7 +742,7 @@ async function fetchGiteeLatestUpdateInfo() {
     }
     const data = await resp.json();
     const releases = Array.isArray(data) ? data : (data ? [data] : []);
-    const release = releases.find(item => item && item.prerelease !== true) || releases[0] || null;
+    const release = selectLatestStableRelease(releases);
     if (!release) return localUpdateFallback('Gitee release empty', { configured: true });
     const latestVersion = normalizeVersion(release.tag_name || release.name || APP_VERSION) || APP_VERSION;
     const notes = extractReleaseNotes(release.body || release.description).length
