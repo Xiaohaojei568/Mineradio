@@ -72,11 +72,9 @@ var dualAccountMode = initialAccountScopePreference.scope === 'all';
 var startupPlaybackRestoreAttempted = false;
 var startupPlaybackRestoreReady = false;
 var lastPlaybackSaveAt = 0;
-var qqCookieBusy = false;
 var neteaseWebLoginBusy = false;
 var qqWebLoginBusy = false;
 var sodaLoginBusy = false;
-var qqManualCookieOpen = false;
 var loginStatusChecked = false, loginStatusCheckFailed = false;
 var startupAccountHydrating = false, startupAccountContentTimer = 0;
 var qrPollTimer = null, qrKey = null;
@@ -819,15 +817,15 @@ function clonePackagedDefaultFxSnapshot() {
 function packagedDefaultLyricLayoutRaw() {
   return Object.assign({ desktopLyricsSchema: 'desktop-lyrics-v3' }, clonePackagedDefaultFxSnapshot());
 }
-var DEVELOPMENT_LOCKED_FX = {
-  wallpaperMode: true
-};
+var DEVELOPMENT_LOCKED_FX = {};
 function isDevelopmentLockedFx(key) {
   return !!DEVELOPMENT_LOCKED_FX[key];
 }
 function normalizeDevelopmentLockedFxState() {
   if (!fx) return;
-  fx.wallpaperMode = false;
+  Object.keys(DEVELOPMENT_LOCKED_FX).forEach(function(key){
+    if (DEVELOPMENT_LOCKED_FX[key]) fx[key] = false;
+  });
 }
 function readSavedPlaybackVisualPreset() {
   try {
@@ -5100,7 +5098,7 @@ function readSavedLyricLayout() {
       performanceBackground: normalizePerformanceBackgroundMode(raw.performanceBackground, raw.liveBackgroundKeep === true),
       performanceQuality: normalizePerformanceQuality(raw.performanceQuality),
       liveBackgroundKeep: normalizePerformanceBackgroundMode(raw.performanceBackground, raw.liveBackgroundKeep === true) === 'keep',
-      wallpaperMode: false,
+      wallpaperMode: raw.wallpaperMode === true,
       wallpaperOpacity: clampRange(raw.wallpaperOpacity == null ? fxDefaults.wallpaperOpacity : Number(raw.wallpaperOpacity), 0.35, 1),
       coverResolution: normalizeCoverResolution(raw.coverResolution),
       shelf: /^(off|side|stage)$/.test(String(raw.shelf || '')) ? raw.shelf : fxDefaults.shelf,
@@ -5197,7 +5195,7 @@ function saveLyricLayout() {
       performanceBackground: normalizePerformanceBackgroundMode(fx.performanceBackground, fx.liveBackgroundKeep === true),
       performanceQuality: normalizePerformanceQuality(fx.performanceQuality),
       liveBackgroundKeep: normalizePerformanceBackgroundMode(fx.performanceBackground, fx.liveBackgroundKeep === true) === 'keep',
-      wallpaperMode: false,
+      wallpaperMode: !!fx.wallpaperMode,
       wallpaperOpacity: clampRange(fx.wallpaperOpacity == null ? fxDefaults.wallpaperOpacity : Number(fx.wallpaperOpacity), 0.35, 1),
       coverResolution: normalizeCoverResolution(fx.coverResolution),
       shelf: /^(off|side|stage)$/.test(String(fx.shelf || '')) ? fx.shelf : fxDefaults.shelf,
@@ -21561,7 +21559,7 @@ function updateDevelopmentFxControls() {
     ['desktopLyricsClickThrough', 't-desktopLyricsClickThrough', '锁定后防误触；鼠标移到桌面歌词上按中键可锁定/解锁'],
     ['desktopLyricsCinema', 't-desktopLyricsCinema', '桌面歌词绑定鼓点电影震动，基础漂浮始终保留'],
     ['desktopLyricsHighlight', 't-desktopLyricsHighlight', '桌面歌词按播放进度高亮'],
-    ['wallpaperMode', 't-wallpaperMode', '开发中，暂不可用']
+    ['wallpaperMode', 't-wallpaperMode', '只透明底层应用背景，保留视觉和控制区域']
   ].forEach(function(item){
     var locked = isDevelopmentLockedFx(item[0]);
     var el = document.getElementById(item[1]);
@@ -24001,8 +23999,6 @@ function updateLoginProviderUi() {
   var shell = document.getElementById('qr-shell');
   var st = document.getElementById('qr-status');
   var refreshBtn = document.getElementById('refresh-qr-btn');
-  var qqPanel = document.getElementById('qq-cookie-panel');
-  var qqCookieToggle = document.getElementById('qq-cookie-toggle-btn');
   var qqCard = document.getElementById('qq-web-login-card');
   var neteaseBtn = document.getElementById('login-provider-netease');
   var qqBtn = document.getElementById('login-provider-qq');
@@ -24026,11 +24022,6 @@ function updateLoginProviderUi() {
     shell.classList.toggle('web-login-preview', isQQ || isSoda || canOpenNeteaseWeb);
     shell.classList.toggle('qq-preview', isQQ);
     shell.classList.toggle('netease-preview', !isQQ && !isSoda && canOpenNeteaseWeb);
-  }
-  if (qqPanel) qqPanel.classList.toggle('show', isQQ && qqManualCookieOpen);
-  if (qqCookieToggle) {
-    qqCookieToggle.classList.toggle('show', isQQ);
-    qqCookieToggle.textContent = qqManualCookieOpen ? '收起导入' : '手动导入';
   }
   if (qqCard) {
     qqCard.onclick = openProviderWebLogin;
@@ -24112,9 +24103,23 @@ async function refreshQr() {
 }
 function startQrPoll() { if (qrPollTimer) clearInterval(qrPollTimer); qrPollTimer = setInterval(checkQr, 2000); }
 function stopQrPoll() { if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; } }
-function toggleQQCookiePanel() {
-  qqManualCookieOpen = !qqManualCookieOpen;
-  updateLoginProviderUi();
+function sodaDiagnosticsText(info) {
+  var d = info && info.diagnostics;
+  if (!d) return '';
+  var prefixes = d.encryptedPrefixes || {};
+  var prefixText = Object.keys(prefixes).map(function(key){ return key + ':' + prefixes[key]; }).join('/');
+  var parts = [
+    '目录 ' + (d.userDataDirCount || 0),
+    'Cookie库 ' + (d.cookieDbCount || 0),
+    'Cookie行 ' + (d.cookieRowCount || 0),
+    '已解密 ' + (d.decryptedCookieCount || 0),
+    '解密失败 ' + (d.decryptFailureCount || 0),
+    '密钥 ' + (d.localStateCount || 0),
+    '客户端 ' + (d.clientDirDetected ? '已找到' : '未找到')
+  ];
+  if (prefixText) parts.push('加密 ' + prefixText);
+  if (d.error) parts.push('错误 ' + d.error);
+  return '（' + parts.join('，') + '）';
 }
 function openProviderWebLogin() {
   if (loginProvider === 'soda') return syncSodaLoginFromLocal();
@@ -24175,7 +24180,7 @@ async function syncSodaLoginFromLocal() {
   if (statusEl) { statusEl.textContent = '正在读取本机汽水音乐登录…'; statusEl.className = 'preview'; }
   try {
     var info = await refreshSodaLoginStatus(true);
-    if (!info || !info.loggedIn) throw new Error((info && (info.message || info.error)) || '未读取到汽水音乐登录，请先打开汽水音乐完成登录');
+    if (!info || !info.loggedIn) throw new Error(((info && (info.message || info.error)) || '未读取到汽水音乐登录，请先打开汽水音乐完成登录') + sodaDiagnosticsText(info));
     sodaLoginStatus = info;
     activeAccountProvider = 'soda';
     saveAccountScopePreference('soda', 'soda');
@@ -24200,9 +24205,8 @@ async function openQQWebLogin() {
   var statusEl = document.getElementById('qr-status');
   var api = window.desktopWindow;
   if (!api || !api.isDesktop || typeof api.openQQMusicLogin !== 'function') {
-    qqManualCookieOpen = true;
     updateLoginProviderUi();
-    if (statusEl) { statusEl.textContent = '当前环境不支持自动网页登录，可先使用手动导入。'; statusEl.className = 'fail'; }
+    if (statusEl) { statusEl.textContent = '当前环境不支持 QQ 官方网页登录'; statusEl.className = 'fail'; }
     return;
   }
 
@@ -24224,7 +24228,6 @@ async function openQQWebLogin() {
     qqLoginStatus = info;
     activeAccountProvider = 'qq';
     saveAccountScopePreference('qq', 'qq');
-    qqManualCookieOpen = false;
     renderUserBtn();
     refreshUserPlaylists(true);
     homeDiscoverState.loaded = false;
@@ -24244,47 +24247,6 @@ async function openQQWebLogin() {
       qqWebLoginBusy = false;
       updateLoginProviderUi();
     }
-  }
-}
-async function submitQQCookieLogin() {
-  if (qqCookieBusy) return;
-  var input = document.getElementById('qq-cookie-input');
-  var statusEl = document.getElementById('qr-status');
-  var saveBtn = document.getElementById('qq-cookie-save-btn');
-  var cookie = input ? input.value.trim() : '';
-  if (!cookie) {
-    if (statusEl) { statusEl.textContent = '先粘贴 QQ 音乐 cookie'; statusEl.className = 'fail'; }
-    return;
-  }
-  qqCookieBusy = true;
-  if (saveBtn) saveBtn.classList.add('busy');
-  if (statusEl) { statusEl.textContent = '正在保存 QQ 会话…'; statusEl.className = 'preview'; }
-  try {
-    var info = await apiJson('/api/qq/login/cookie', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cookie: cookie })
-    });
-    if (!info || !info.loggedIn) throw new Error((info && (info.message || info.error)) || 'QQ 会话不可用');
-    qqLoginStatus = info;
-    activeAccountProvider = 'qq';
-    saveAccountScopePreference('qq', 'qq');
-    if (input) input.value = '';
-    renderUserBtn();
-    refreshUserPlaylists(true);
-    homeDiscoverState.loaded = false;
-    loadHomeDiscover(true);
-    var manualQQPlaybackReady = !!info.playbackKeyReady;
-    if (statusEl) { statusEl.textContent = manualQQPlaybackReady ? 'QQ 音乐会话已保存' : 'QQ 账号已同步，播放授权不完整，部分歌曲会自动换源'; statusEl.className = 'scan'; }
-    setTimeout(function(){
-      closeLoginModal();
-      showToast((manualQQPlaybackReady ? 'QQ 音乐已登录: ' : 'QQ 账号已同步: ') + (info.nickname || info.userId || ''));
-    }, 420);
-  } catch (e) {
-    if (statusEl) { statusEl.textContent = e && e.message ? e.message : 'QQ 会话保存失败'; statusEl.className = 'fail'; }
-  } finally {
-    qqCookieBusy = false;
-    if (saveBtn) saveBtn.classList.remove('busy');
   }
 }
 async function checkQr() {
@@ -27015,7 +26977,7 @@ function desktopLyricsPayload(forceBeatMap) {
 function wallpaperPayload() {
   var meta = currentDesktopSongMeta();
   return {
-    enabled: !!fx.wallpaperMode && !isDevelopmentLockedFx('wallpaperMode'),
+    enabled: !!fx.wallpaperMode,
     title: meta.title,
     artist: meta.artist,
     cover: meta.cover,
@@ -27024,6 +26986,20 @@ function wallpaperPayload() {
     opacity: clampRange(fx.wallpaperOpacity == null ? fxDefaults.wallpaperOpacity : Number(fx.wallpaperOpacity), 0.35, 1),
     colors: desktopOverlayColors()
   };
+}
+function normalizedWallpaperOpacity(value) {
+  var n = Number(value);
+  if (!isFinite(n)) n = fxDefaults.wallpaperOpacity;
+  return clampRange(n, 0.35, 1);
+}
+function applyWallpaperModeVisuals(payload) {
+  payload = payload || wallpaperPayload();
+  var enabled = !!(payload && payload.enabled);
+  var opacity = normalizedWallpaperOpacity(payload && payload.opacity);
+  var backgroundAlpha = enabled ? 1 - opacity : 0;
+  document.documentElement.classList.toggle('wallpaper-mode', enabled);
+  document.body.classList.toggle('wallpaper-mode', enabled);
+  document.documentElement.style.setProperty('--wallpaper-background-alpha', backgroundAlpha.toFixed(3));
 }
 function pushDesktopLyricsState(force) {
   var api = getDesktopWindowApi();
@@ -27051,29 +27027,34 @@ function applyDesktopLyricsState(force) {
 }
 function pushWallpaperState(force) {
   var api = getDesktopWindowApi();
-  if (!api || typeof api.updateWallpaperMode !== 'function') return;
+  var payload = wallpaperPayload();
+  applyWallpaperModeVisuals(payload);
+  if (!api || typeof api.updateMainWallpaperMode !== 'function') return;
   var now = performance.now();
   if (!force && now - desktopOverlayPushState.wallpaperAt < 260) return;
-  var payload = wallpaperPayload();
   var key = payload.enabled + '|' + payload.title + '|' + payload.artist + '|' + payload.cover + '|' + payload.playing + '|' + payload.preset + '|' + payload.opacity;
   if (!force && key === desktopOverlayPushState.lastWallpaperKey && now - desktopOverlayPushState.wallpaperAt < 1400) return;
   desktopOverlayPushState.wallpaperAt = now;
   desktopOverlayPushState.lastWallpaperKey = key;
-  api.updateWallpaperMode(payload).catch(function(e){ console.warn('wallpaper update failed:', e); });
+  api.updateMainWallpaperMode(payload).catch(function(e){ console.warn('wallpaper update failed:', e); });
 }
 function applyWallpaperModeState(force) {
   var api = getDesktopWindowApi();
-  if (!api) return;
   normalizeDevelopmentLockedFxState();
   var payload = wallpaperPayload();
+  applyWallpaperModeVisuals(payload);
+  if (!api) return;
+  if (typeof api.setMainWallpaperMode === 'function') {
+    api.setMainWallpaperMode(!!payload.enabled, payload).catch(function(e){ console.warn('wallpaper state failed:', e); });
+  }
   if (typeof api.setWallpaperMode === 'function') {
-    api.setWallpaperMode(!!payload.enabled, payload).catch(function(e){ console.warn('wallpaper state failed:', e); });
+    api.setWallpaperMode(false, payload).catch(function(e){ console.warn('legacy wallpaper close failed:', e); });
   }
   pushWallpaperState(!!force);
 }
 function syncDesktopOverlayState() {
   if (fx.desktopLyrics) pushDesktopLyricsState(false);
-  if (fx.wallpaperMode) pushWallpaperState(false);
+  pushWallpaperState(false);
 }
 
 // 全屏
@@ -28827,7 +28808,6 @@ scheduleNextRenderFrame(0);
   if (typeof storeLocalBeatEntry === 'function') window.storeLocalBeatEntry = storeLocalBeatEntry;
   if (typeof strokeLines === 'function') window.strokeLines = strokeLines;
   if (typeof submitBubbleReply === 'function') window.submitBubbleReply = submitBubbleReply;
-  if (typeof submitQQCookieLogin === 'function') window.submitQQCookieLogin = submitQQCookieLogin;
   if (typeof supportsControlGlassSvgFilter === 'function') window.supportsControlGlassSvgFilter = supportsControlGlassSvgFilter;
   if (typeof suppressBottomControlsForShelf === 'function') window.suppressBottomControlsForShelf = suppressBottomControlsForShelf;
   if (typeof suppressShelfPreviewForPlaybackSwitch === 'function') window.suppressShelfPreviewForPlaybackSwitch = suppressShelfPreviewForPlaybackSwitch;
@@ -28885,7 +28865,6 @@ scheduleNextRenderFrame(0);
   if (typeof togglePlay === 'function') window.togglePlay = togglePlay;
   if (typeof togglePlaylistPanel === 'function') window.togglePlaylistPanel = togglePlaylistPanel;
   if (typeof togglePlaylistPanelPinned === 'function') window.togglePlaylistPanelPinned = togglePlaylistPanelPinned;
-  if (typeof toggleQQCookiePanel === 'function') window.toggleQQCookiePanel = toggleQQCookiePanel;
   if (typeof toggleQualityPanel === 'function') window.toggleQualityPanel = toggleQualityPanel;
   if (typeof toggleUserCapsuleAutoHide === 'function') window.toggleUserCapsuleAutoHide = toggleUserCapsuleAutoHide;
   if (typeof toggleVolumePanel === 'function') window.toggleVolumePanel = toggleVolumePanel;

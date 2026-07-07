@@ -1,13 +1,14 @@
 {
   "name": "mineradio",
   "productName": "Mineradio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "沉浸式音乐播放器，融合天气电台、歌词舞台、粒子视觉和 3D 歌单架。",
   "author": "Mineradio",
   "main": "desktop/main.js",
   "private": true,
   "scripts": {
     "dev:renderer": "vite --host 127.0.0.1",
+    "dev:desktop": "node build/dev-desktop.js",
     "build:renderer": "vite build",
     "start": "npm run build:renderer && electron .",
     "build:win": "npm run build:renderer && electron-builder --win nsis",

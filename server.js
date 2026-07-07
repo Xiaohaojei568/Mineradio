@@ -2399,8 +2399,8 @@ const SODA_CLIENT_SCAN_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 const SODA_CLIENT_NEGATIVE_SCAN_CACHE_MS = 60 * 1000;
 const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(3000, Math.min(30000, Number(process.env.SODA_CLIENT_GLOBAL_SCAN_MS) || 12000));
 const SODA_USER_DATA_SCAN_CACHE_MS = 60 * 1000;
-const SODA_USER_DATA_SCAN_MAX_FILES = 180;
-const SODA_USER_DATA_SCAN_MAX_MS = Math.max(1000, Math.min(12000, Number(process.env.SODA_USER_DATA_SCAN_MAX_MS) || 4500));
+const SODA_USER_DATA_SCAN_MAX_FILES = Math.max(180, Math.min(600, Number(process.env.SODA_USER_DATA_SCAN_MAX_FILES) || 360));
+const SODA_USER_DATA_SCAN_MAX_MS = Math.max(1000, Math.min(15000, Number(process.env.SODA_USER_DATA_SCAN_MAX_MS) || 9000));
 let sodaAutoSyncEnabled = true;
 let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
@@ -2483,8 +2483,10 @@ function sodaDefaultUserDataDirs() {
     if (dir) dirs.push(dir);
   }
   if (process.env.APPDATA) pushDir(path.join(process.env.APPDATA, 'SodaMusic'));
+  if (process.env.LOCALAPPDATA) pushDir(path.join(process.env.LOCALAPPDATA, 'SodaMusic'));
   if (process.env.USERPROFILE) {
     pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'SodaMusic'));
+    pushDir(path.join(process.env.USERPROFILE, 'AppData', 'Local', 'SodaMusic'));
   }
   return uniqueExistingOrder(dirs);
 }
@@ -2496,6 +2498,10 @@ function sodaStaticUserDataDirs() {
 function sodaKnownUserDataDirs(opts) {
   opts = opts || {};
   const dirs = sodaStaticUserDataDirs();
+  if (opts.discover) {
+    dirs.push(...readRunningSodaUserDataDirs());
+    dirs.push(...sodaPackagedUserDataDirs());
+  }
   if (opts.discover) dirs.push(...sodaDiscoveredUserDataDirs());
   return uniqueExistingOrder(dirs);
 }
@@ -2572,6 +2578,55 @@ function readRunningSodaProcessRoots() {
   } catch (e) {
     return [];
   }
+}
+
+function readRunningSodaUserDataDirs() {
+  if (process.platform !== 'win32') return [];
+  try {
+    const script = "$ErrorActionPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'sodamusic' -or $_.ExecutablePath -match 'SodaMusic' -or $_.CommandLine -match 'SodaMusic' } | ForEach-Object { $_.CommandLine }";
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const dirs = [];
+    const re = /--(?:user-data-dir|userDataDir|user-data-path)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/ig;
+    String(out || '').split(/\r?\n/).forEach(line => {
+      let match;
+      while ((match = re.exec(line))) {
+        const dir = normalizeWindowsPathHint(match[1] || match[2] || match[3] || '');
+        if (dir) dirs.push(dir);
+      }
+      re.lastIndex = 0;
+    });
+    return uniqueExistingOrder(dirs).filter(pathExistsDir);
+  } catch (e) {
+    return [];
+  }
+}
+
+function sodaPackagedUserDataDirs() {
+  if (process.platform !== 'win32' || !process.env.LOCALAPPDATA) return [];
+  const packagesRoot = path.join(process.env.LOCALAPPDATA, 'Packages');
+  if (!pathExistsDir(packagesRoot)) return [];
+  const dirs = [];
+  let entries = [];
+  try { entries = fs.readdirSync(packagesRoot, { withFileTypes: true }); }
+  catch (e) { return []; }
+  entries
+    .filter(entry => entry.isDirectory() && /soda|luna|qishui|bytedance|douyin|music/i.test(entry.name))
+    .slice(0, 24)
+    .forEach(entry => {
+      const root = path.join(packagesRoot, entry.name);
+      [
+        ['LocalCache', 'Roaming', 'SodaMusic'],
+        ['LocalCache', 'Local', 'SodaMusic'],
+        ['RoamingState', 'SodaMusic'],
+        ['LocalState', 'SodaMusic'],
+      ].forEach(rel => dirs.push(path.join(root, ...rel)));
+    });
+  return uniqueExistingOrder(dirs).filter(pathExistsDir);
 }
 
 function sodaKnownInstallRoots() {
@@ -2897,7 +2952,11 @@ function sodaBdticketSettings() {
 }
 
 function readSodaDeviceInfoFresh() {
-  for (const dir of sodaKnownUserDataDirs()) {
+  const dirs = uniqueExistingOrder(
+    (sodaLastLocalSync.userDataDirs || [])
+      .concat(sodaKnownUserDataDirs({ discover: true }))
+  );
+  for (const dir of dirs) {
     const file = dir ? path.join(dir, 'DeviceV1') : '';
     if (!pathExistsFile(file)) continue;
     try {
@@ -2978,7 +3037,25 @@ function sodaCookieObject() {
 
 function sodaCookieHasLoginTicket(obj) {
   obj = obj || sodaCookieObject();
-  return !!(obj.sessionid || obj.sessionid_ss || obj.sid_tt || obj.uid_tt || obj.uid_tt_ss || obj.sid_guard);
+  return !!(
+    obj.sessionid
+    || obj.sessionid_ss
+    || obj.sid_tt
+    || obj.uid_tt
+    || obj.uid_tt_ss
+    || obj.sid_guard
+    || obj.sid_ucp_v1
+    || obj.ssid_ucp_v1
+    || obj.passport_auth_status
+    || obj.passport_auth_status_ss
+    || obj.passport_assist_user
+    || obj.multi_sids
+    || obj.cmpl_token
+    || obj.n_mh
+    || obj.session_tlb_tag
+    || obj.odin_tt
+    || obj.d_ticket
+  );
 }
 
 function pathExistsFile(file) {
@@ -2989,6 +3066,12 @@ function pathExistsFile(file) {
 function pathExistsDir(dir) {
   try { return !!dir && fs.existsSync(dir) && fs.statSync(dir).isDirectory(); }
   catch (e) { return false; }
+}
+
+function fileNameEquals(a, b) {
+  return process.platform === 'win32'
+    ? String(a || '').toLowerCase() === String(b || '').toLowerCase()
+    : String(a || '') === String(b || '');
 }
 
 function findFilesByName(root, fileName, maxDepth, maxResults, out, deadline) {
@@ -3003,7 +3086,7 @@ function findFilesByName(root, fileName, maxDepth, maxResults, out, deadline) {
     if (deadline && Date.now() > deadline) break;
     if (out.length >= maxResults) break;
     const full = path.join(root, entry.name);
-    if (entry.isFile() && entry.name === fileName) {
+    if (entry.isFile() && fileNameEquals(entry.name, fileName)) {
       out.push(full);
       continue;
     }
@@ -3021,6 +3104,10 @@ function sodaUserDataScanRoots() {
   }
   pushRoot(process.env.SODA_USER_DATA_ROOT);
   for (const dir of sodaStaticUserDataDirs()) pushRoot(dir);
+  if (process.env.APPDATA) pushRoot(process.env.APPDATA);
+  if (process.env.LOCALAPPDATA) pushRoot(process.env.LOCALAPPDATA);
+  readRunningSodaUserDataDirs().forEach(pushRoot);
+  sodaPackagedUserDataDirs().forEach(pushRoot);
   const clientDir = sodaOfficialClientDirCache && sodaOfficialClientDirCache.clientDir || '';
   if (clientDir) {
     pushRoot(clientDir);
@@ -3340,6 +3427,258 @@ function readCookieRowsWithSqliteCli(dbPath) {
   }
 }
 
+function readSqliteVarint(buf, offset, limit) {
+  limit = Math.min(limit || buf.length, buf.length);
+  let value = 0n;
+  for (let i = 0; i < 9 && offset + i < limit; i++) {
+    const byte = buf[offset + i];
+    if (i === 8) {
+      value = (value << 8n) | BigInt(byte);
+      return { value: Number(value), next: offset + i + 1 };
+    }
+    value = (value << 7n) | BigInt(byte & 0x7f);
+    if ((byte & 0x80) === 0) return { value: Number(value), next: offset + i + 1 };
+  }
+  return null;
+}
+
+function sqliteSerialTypeSize(type) {
+  if (type === 0 || type === 8 || type === 9) return 0;
+  if (type === 1) return 1;
+  if (type === 2) return 2;
+  if (type === 3) return 3;
+  if (type === 4) return 4;
+  if (type === 5) return 6;
+  if (type === 6 || type === 7) return 8;
+  if (type >= 12) return Math.floor((type - (type % 2 ? 13 : 12)) / 2);
+  return -1;
+}
+
+function readSqliteInt(buf, offset, size) {
+  let value = 0n;
+  for (let i = 0; i < size; i++) value = (value << 8n) | BigInt(buf[offset + i] || 0);
+  const signBit = 1n << BigInt(size * 8 - 1);
+  if (value & signBit) value -= 1n << BigInt(size * 8);
+  const asNumber = Number(value);
+  return Number.isSafeInteger(asNumber) ? asNumber : value.toString();
+}
+
+function readSqliteRecord(buf, offset, size) {
+  const end = Math.min(offset + size, buf.length);
+  const header = readSqliteVarint(buf, offset, end);
+  if (!header || header.value <= 0) return null;
+  const headerEnd = offset + header.value;
+  if (headerEnd > end) return null;
+  const types = [];
+  let cursor = header.next;
+  while (cursor < headerEnd) {
+    const item = readSqliteVarint(buf, cursor, headerEnd);
+    if (!item) return null;
+    types.push(item.value);
+    cursor = item.next;
+  }
+  cursor = headerEnd;
+  return types.map(type => {
+    const fieldSize = sqliteSerialTypeSize(type);
+    if (fieldSize < 0 || cursor + fieldSize > end) return null;
+    let value = null;
+    if (type === 8) value = 0;
+    else if (type === 9) value = 1;
+    else if (type >= 1 && type <= 6) value = readSqliteInt(buf, cursor, fieldSize);
+    else if (type === 7) value = buf.readDoubleBE(cursor);
+    else if (type >= 12 && type % 2 === 0) value = Buffer.from(buf.subarray(cursor, cursor + fieldSize));
+    else if (type >= 13 && type % 2 === 1) value = buf.subarray(cursor, cursor + fieldSize).toString('utf8');
+    cursor += fieldSize;
+    return value;
+  });
+}
+
+function readSqliteTableRowsFromPage(buf, pageNo, pageSize, out, visited, maxRows) {
+  if (!pageNo || out.length >= maxRows) return;
+  if (visited.has(pageNo)) return;
+  visited.add(pageNo);
+  const pageBase = (pageNo - 1) * pageSize;
+  if (pageBase < 0 || pageBase >= buf.length) return;
+  const headerOffset = pageNo === 1 ? 100 : 0;
+  const pageHeader = pageBase + headerOffset;
+  const type = buf[pageHeader];
+  if (type !== 0x0d && type !== 0x05) return;
+  const cellCount = buf.readUInt16BE(pageHeader + 3);
+  const cellPtrStart = pageHeader + (type === 0x05 ? 12 : 8);
+  if (type === 0x05) {
+    for (let i = 0; i < cellCount && out.length < maxRows; i++) {
+      const cellPtr = pageBase + buf.readUInt16BE(cellPtrStart + i * 2);
+      const childPage = buf.readUInt32BE(cellPtr);
+      readSqliteTableRowsFromPage(buf, childPage, pageSize, out, visited, maxRows);
+    }
+    readSqliteTableRowsFromPage(buf, buf.readUInt32BE(pageHeader + 8), pageSize, out, visited, maxRows);
+    return;
+  }
+  for (let i = 0; i < cellCount && out.length < maxRows; i++) {
+    const cellPtr = pageBase + buf.readUInt16BE(cellPtrStart + i * 2);
+    const payload = readSqliteVarint(buf, cellPtr, pageBase + pageSize);
+    if (!payload) continue;
+    const rowid = readSqliteVarint(buf, payload.next, pageBase + pageSize);
+    if (!rowid) continue;
+    const payloadStart = rowid.next;
+    if (payloadStart + payload.value > pageBase + pageSize) continue;
+    const record = readSqliteRecord(buf, payloadStart, payload.value);
+    if (record) out.push(record);
+  }
+}
+
+function readSqliteDatabaseImage(dbPath) {
+  const main = fs.readFileSync(dbPath);
+  if (main.length < 100 || main.subarray(0, 16).toString('ascii') !== 'SQLite format 3\0') return { buf: main, pageSize: 0 };
+  let pageSize = main.readUInt16BE(16);
+  if (pageSize === 1) pageSize = 65536;
+  if (!pageSize || pageSize < 512) return { buf: main, pageSize: 0 };
+  const walPath = dbPath + '-wal';
+  if (!pathExistsFile(walPath)) return { buf: main, pageSize };
+  let image = main;
+  try {
+    const wal = fs.readFileSync(walPath);
+    if (wal.length < 32) return { buf: image, pageSize };
+    const magicBE = wal.readUInt32BE(0);
+    const magicLE = wal.readUInt32LE(0);
+    const beMagic = magicBE === 0x377f0682 || magicBE === 0x377f0683;
+    const leMagic = magicLE === 0x377f0682 || magicLE === 0x377f0683;
+    if (!beMagic && !leMagic) return { buf: image, pageSize };
+    const read32 = leMagic && !beMagic ? (offset) => wal.readUInt32LE(offset) : (offset) => wal.readUInt32BE(offset);
+    let walPageSize = read32(8);
+    if (walPageSize === 1) walPageSize = 65536;
+    if (!walPageSize) walPageSize = pageSize;
+    if (walPageSize !== pageSize || walPageSize < 512) return { buf: image, pageSize };
+    function ensureSize(size) {
+      if (image.length >= size) return;
+      const next = Buffer.alloc(size);
+      image.copy(next);
+      image = next;
+    }
+    const frameSize = 24 + pageSize;
+    const frames = [];
+    let committedFrames = 0;
+    for (let offset = 32; offset + frameSize <= wal.length; offset += frameSize) {
+      const pageNo = read32(offset);
+      if (!pageNo) continue;
+      frames.push({ pageNo, pageOffset: offset + 24 });
+      if (read32(offset + 4) > 0) committedFrames = frames.length;
+    }
+    for (let i = 0; i < committedFrames; i++) {
+      const frame = frames[i];
+      const pageNo = frame.pageNo;
+      const pageStart = (pageNo - 1) * pageSize;
+      ensureSize(pageStart + pageSize);
+      wal.copy(image, pageStart, frame.pageOffset, frame.pageOffset + pageSize);
+    }
+  } catch (e) {}
+  return { buf: image, pageSize };
+}
+
+function readSqliteTableRowsWithJs(dbPath, rootPage, maxRows) {
+  const image = readSqliteDatabaseImage(dbPath);
+  const buf = image.buf;
+  const pageSize = image.pageSize;
+  if (!pageSize) return [];
+  const rows = [];
+  readSqliteTableRowsFromPage(buf, rootPage || 1, pageSize, rows, new Set(), maxRows || 20000);
+  return rows;
+}
+
+function splitSqliteColumnDefs(sql) {
+  const start = String(sql || '').indexOf('(');
+  const end = String(sql || '').lastIndexOf(')');
+  if (start < 0 || end <= start) return [];
+  const body = sql.slice(start + 1, end);
+  const parts = [];
+  let depth = 0;
+  let quote = '';
+  let current = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && body[i + 1] === quote) current += body[++i];
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '[') {
+      quote = ']';
+      current += ch;
+      continue;
+    }
+    if (ch === '(') depth++;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      parts.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function sqliteUnquoteIdentifier(value) {
+  value = String(value || '').trim();
+  if (!value) return '';
+  if ((value[0] === '"' && value.endsWith('"')) || (value[0] === '`' && value.endsWith('`')) || (value[0] === '[' && value.endsWith(']'))) {
+    return value.slice(1, -1).replace(/""/g, '"');
+  }
+  return value.split(/\s+/)[0].replace(/^["'`\[]|["'`\]]$/g, '');
+}
+
+function parseSqliteCreateTableColumns(sql) {
+  const constraints = /^(constraint|primary|unique|check|foreign|exclude)\b/i;
+  return splitSqliteColumnDefs(sql)
+    .filter(part => part && !constraints.test(part))
+    .map(part => sqliteUnquoteIdentifier(part))
+    .filter(Boolean);
+}
+
+function sodaCookieRowMatches(row) {
+  const host = String(row && row.host_key || '').toLowerCase();
+  const name = String(row && row.name || '');
+  const hasValue = !!String(row && row.value || '').trim() || bufferFromSqliteBlob(row && row.encrypted_value).length > 0 || !!String(row && row.encrypted_value_hex || '').trim();
+  if (!hasValue) return false;
+  const hostMatched = SODA_COOKIE_HOST_PATTERNS.some(pattern => host.includes(String(pattern || '').replace(/%/g, '').toLowerCase()));
+  const nameMatched = SODA_LOGIN_COOKIE_NAMES.includes(name);
+  return hostMatched || nameMatched;
+}
+
+function readCookieRowsWithJsSqlite(dbPath) {
+  try {
+    const schemaRows = readSqliteTableRowsWithJs(dbPath, 1, 2000);
+    const cookiesSchema = schemaRows.find(row => String(row && row[0] || '').toLowerCase() === 'table' && String(row && row[1] || '').toLowerCase() === 'cookies');
+    if (!cookiesSchema) return null;
+    const rootPage = Number(cookiesSchema[3]) || 0;
+    const columns = parseSqliteCreateTableColumns(String(cookiesSchema[4] || ''));
+    if (!rootPage || !columns.length) return null;
+    const rows = readSqliteTableRowsWithJs(dbPath, rootPage, 30000);
+    function valueOf(row, column) {
+      const index = columns.findIndex(item => item.toLowerCase() === column);
+      return index >= 0 ? row[index] : null;
+    }
+    return rows.map(row => ({
+      host_key: valueOf(row, 'host_key') || '',
+      name: valueOf(row, 'name') || '',
+      value: valueOf(row, 'value') || '',
+      encrypted_value: bufferFromSqliteBlob(valueOf(row, 'encrypted_value')),
+      path: valueOf(row, 'path') || '',
+      last_update_utc: valueOf(row, 'last_update_utc') || 0,
+      creation_utc: valueOf(row, 'creation_utc') || 0,
+    })).filter(sodaCookieRowMatches).sort((a, b) => Number(a.last_update_utc || a.creation_utc || 0) - Number(b.last_update_utc || b.creation_utc || 0));
+  } catch (e) {
+    return null;
+  }
+}
+
 function copyFileSharedReadSync(source, dest) {
   try {
     fs.copyFileSync(source, dest);
@@ -3382,7 +3721,7 @@ function readCookieRowsFromSnapshot(dbPath) {
       const source = dbPath + suffix;
       if (pathExistsFile(source)) copyFileSharedReadSync(source, tmpDb + suffix);
     }
-    return readCookieRowsWithNodeSqlite(tmpDb) || readCookieRowsWithSqliteCli(tmpDb);
+    return readCookieRowsWithNodeSqlite(tmpDb) || readCookieRowsWithJsSqlite(tmpDb) || readCookieRowsWithSqliteCli(tmpDb);
   } catch (e) {
     return null;
   } finally {
@@ -3395,11 +3734,13 @@ function readCookieRowsFromSnapshot(dbPath) {
 function readSodaCookieRows(dbPath) {
   const direct = readCookieRowsWithNodeSqlite(dbPath);
   if (direct && direct.length) return direct;
+  const js = readCookieRowsWithJsSqlite(dbPath);
+  if (js && js.length) return js;
   const cli = readCookieRowsWithSqliteCli(dbPath);
   if (cli && cli.length) return cli;
   const snapshot = readCookieRowsFromSnapshot(dbPath);
   if (snapshot && snapshot.length) return snapshot;
-  return direct || cli || snapshot || [];
+  return direct || js || cli || snapshot || [];
 }
 
 function sodaClientDetected(forceScan) {
@@ -3473,12 +3814,12 @@ function sodaLoginDebugSnapshot() {
 
 function readSodaCookieFromClient(opts) {
   opts = opts || {};
-  let userDataDirs = sodaKnownUserDataDirs({ discover: false }).filter(pathExistsDir);
-  let cookieDbs = sodaCookieDbCandidates({ discover: false });
-  if (!cookieDbs.length) {
-    cookieDbs = sodaCookieDbCandidates({ discover: true });
-    userDataDirs = sodaKnownUserDataDirs({ discover: true }).filter(pathExistsDir);
-  }
+  const staticUserDataDirs = sodaKnownUserDataDirs({ discover: false }).filter(pathExistsDir);
+  const discoveredUserDataDirs = sodaKnownUserDataDirs({ discover: true }).filter(pathExistsDir);
+  const userDataDirs = uniqueExistingOrder(staticUserDataDirs.concat(discoveredUserDataDirs));
+  const cookieDbs = uniqueExistingOrder(
+    sodaCookieDbCandidates({ discover: false }).concat(sodaCookieDbCandidates({ discover: true }))
+  ).filter(pathExistsFile);
   const picked = new Map();
   let lastError = '';
   let cookieRows = 0;
@@ -3532,6 +3873,7 @@ function refreshSodaCookieFromClient(force, opts) {
     saveSodaCookie(clientCookie);
     sodaLoginInfoCache = null;
     sodaLoginInfoCacheAt = 0;
+    sodaDeviceInfoCache = null;
   }
   return sodaCookie;
 }
@@ -4078,6 +4420,30 @@ async function getSodaLoginInfo(opts) {
     const id = sodaLoginUserId(info, body);
     if (!id) {
       const message = sodaApiErrorMessage(body, '汽水接口没有返回用户信息，登录票据可能已过期或接口字段发生变化');
+      if (hasSavedLoginTicket) {
+        const partialInfo = {
+          provider: 'soda',
+          loggedIn: true,
+          nickname: '汽水音乐',
+          userId: '',
+          avatar: '',
+          vipType: 0,
+          vipLevel: 'none',
+          isVip: false,
+          isSvip: false,
+          vipLabel: '无VIP',
+          hasCookie: true,
+          clientDetected: sodaClientDetected(false),
+          stale: true,
+          profileUnavailable: true,
+          error: message,
+          message: '已读取到汽水音乐本机登录票据，账号资料暂未返回；会继续使用本机会话尝试播放',
+          diagnostics: sodaLocalSyncDiagnostics(),
+        };
+        sodaLoginInfoCache = { cookie: sodaCookie, info: partialInfo };
+        sodaLoginInfoCacheAt = now;
+        return { ...partialInfo };
+      }
       const noUserInfo = {
         provider: 'soda',
         loggedIn: false,
@@ -4113,11 +4479,11 @@ async function getSodaLoginInfo(opts) {
     return { ...result };
   } catch (e) {
     sodaLastLoginProbe = { ok: false, body: null, info: null, checkedAt: Date.now(), error: e.message || String(e) };
-    if (!opts.sync && hasSavedLoginTicket) {
+    if (hasSavedLoginTicket) {
       const staleInfo = {
         provider: 'soda',
         loggedIn: true,
-        nickname: 'Soda Music',
+        nickname: '汽水音乐',
         userId: '',
         avatar: '',
         vipType: 0,
@@ -4128,8 +4494,10 @@ async function getSodaLoginInfo(opts) {
         hasCookie: true,
         clientDetected: sodaClientDetected(false),
         stale: true,
+        profileUnavailable: true,
         error: e.message,
         message: '已使用本机保存的汽水登录凭据，联网验证失败时保持登录状态',
+        diagnostics: sodaLocalSyncDiagnostics(),
       };
       sodaLoginInfoCache = { cookie: sodaCookie, info: staleInfo };
       sodaLoginInfoCacheAt = now;

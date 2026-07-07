@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('desktopWindow', {
   },
   setWallpaperMode: (enabled, payload) => ipcRenderer.invoke('mineradio-wallpaper-set-enabled', !!enabled, payload || {}),
   updateWallpaperMode: (payload) => ipcRenderer.invoke('mineradio-wallpaper-update', payload || {}),
+  setMainWallpaperMode: (enabled, payload) => ipcRenderer.invoke('mineradio-main-wallpaper-set-enabled', !!enabled, payload || {}),
+  updateMainWallpaperMode: (payload) => ipcRenderer.invoke('mineradio-main-wallpaper-update', payload || {}),
   onStateChange: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('desktop-window-state', listener);

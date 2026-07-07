@@ -20,6 +20,7 @@ let desktopLyricsHotBounds = null;
 let desktopLyricsLastMiddleAt = 0;
 let wallpaperWindow = null;
 let wallpaperState = {};
+let mainWallpaperModeState = { enabled: false, opacity: 1 };
 let htmlFullscreenActive = false;
 let windowFullscreenActive = false;
 let mainWindowStateTimer = null;
@@ -38,6 +39,13 @@ const NETEASE_LOGIN_PARTITION = 'persist:mineradio-netease-login';
 const NETEASE_LOGIN_URL = 'https://music.163.com/#/login';
 const QQ_LOGIN_PARTITION = 'persist:mineradio-qqmusic-login';
 const QQ_LOGIN_URL = 'https://y.qq.com/n/ryqq/profile';
+
+function isDesktopDebugMode() {
+  return process.env.MINERADIO_DESKTOP_DEBUG === '1'
+    || process.env.ELECTRON_DEBUG === '1'
+    || process.argv.includes('--debug')
+    || process.argv.includes('--debug-desktop');
+}
 
 const CHROMIUM_PERFORMANCE_SWITCHES = [
   ['autoplay-policy', 'no-user-gesture-required'],
@@ -353,6 +361,7 @@ function getWindowState(win) {
     isMinimized: false,
     isVisible: false,
     isFocused: false,
+    isWallpaperMode: false,
     isPrimaryDisplay: true,
     hasDisplayOnLeft: false,
     hasDisplayOnRight: false,
@@ -367,6 +376,7 @@ function getWindowState(win) {
     isMinimized: win.isMinimized(),
     isVisible: win.isVisible(),
     isFocused: win.isFocused(),
+    isWallpaperMode: !!mainWallpaperModeState.enabled,
     ...getDisplayState(win),
   };
 }
@@ -1208,6 +1218,22 @@ function closeWallpaperWindow() {
   wallpaperWindow = null;
 }
 
+function applyMainWallpaperMode(win = mainWindow, payload = mainWallpaperModeState) {
+  if (!win || win.isDestroyed()) return;
+  mainWallpaperModeState = {
+    ...mainWallpaperModeState,
+    ...(payload || {}),
+    enabled: !!(payload && payload.enabled),
+  };
+  try {
+    win.setBackgroundColor('#00000000');
+  } catch (e) {}
+  try {
+    win.setHasShadow(!mainWallpaperModeState.enabled);
+  } catch (e) {}
+  sendWindowState(win);
+}
+
 function closeOverlayWindows() {
   closeDesktopLyricsWindow();
   closeWallpaperWindow();
@@ -1433,6 +1459,26 @@ ipcMain.handle('mineradio-wallpaper-update', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('mineradio-main-wallpaper-set-enabled', async (event, enabled, payload) => {
+  try {
+    const win = getSenderWindow(event) || mainWindow;
+    applyMainWallpaperMode(win, { ...(payload || {}), enabled: !!enabled });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'MAIN_WALLPAPER_FAILED' };
+  }
+});
+
+ipcMain.handle('mineradio-main-wallpaper-update', async (event, payload) => {
+  try {
+    const win = getSenderWindow(event) || mainWindow;
+    applyMainWallpaperMode(win, { ...mainWallpaperModeState, ...(payload || {}) });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'MAIN_WALLPAPER_UPDATE_FAILED' };
+  }
+});
+
 async function createWindow() {
   htmlFullscreenActive = false;
   windowFullscreenActive = false;
@@ -1503,6 +1549,9 @@ async function createWindow() {
 
   mainWindow.webContents.once('did-finish-load', () => {
     sendWindowState(mainWindow, true);
+    if (isDesktopDebugMode()) {
+      mainWindow.webContents.openDevTools({ mode: 'detach', activate: true });
+    }
   });
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
