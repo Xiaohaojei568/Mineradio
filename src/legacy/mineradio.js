@@ -37,6 +37,7 @@ var lastStrongDrop = 0;           // 用于 burst 预设的强 drop 时刻
 
 var lyricsLines = [], lyricsVisible = false, lyricsHasNativeKaraoke = false, lyricsTimingSource = 'none';
 var playlist = [], playQueue = [], currentIdx = -1, playing = false, playToggleBusy = false, playbackAwaitingUserGesture = false, playbackAudioQueueKey = '';
+var lastAudioPlayError = null;
 var searchMode = 'song', podcastResults = [], podcastPrograms = [], podcastCurrentRadio = null;
 var LAST_ACCOUNT_SCOPE_STORE_KEY = 'mineradio-last-account-scope-v1';
 var LAST_PLAYBACK_STORE_KEY = 'mineradio-last-playback-v1';
@@ -76,13 +77,14 @@ var neteaseWebLoginBusy = false;
 var qqWebLoginBusy = false;
 var sodaLoginBusy = false;
 var loginStatusChecked = false, loginStatusCheckFailed = false;
-var startupAccountHydrating = false, startupAccountContentTimer = 0;
+var startupAccountHydrating = false, startupAccountContentTimer = 0, startupAccountContentDelay = 0;
 var qrPollTimer = null, qrKey = null;
 var volumeTween = null, trackSwitchToken = 0;
 var audioFadeTimer = null, audioElementFadeFrame = 0, audioFadeSerial = 0;
 var AUDIO_FADE_IN_MS = 460;
 var AUDIO_FADE_OUT_MS = 420;
 var AUDIO_SILENCE_GAIN = 0.0001;
+var PLAYBACK_RATE_STORE_KEY = 'mineradio-playback-rate-v1';
 var userPlaylists = [], qqPlaylists = [], sodaPlaylists = [], myPodcastCollections = [], myPodcastItems = {}, playlistCoverCache = {};
 var CUSTOM_COVER_STORE_KEY = 'mineradio-custom-covers';
 var CUSTOM_LYRIC_STORE_KEY = 'mineradio-custom-lyrics-v1';
@@ -158,6 +160,8 @@ var homeDiscoverState = {
   millionSongs: [],
   artistRoamSongs: [],
   recommendationSongs: [],
+  dailyByProvider: { netease: [], qq: [], soda: [] },
+  providerLoggedIn: { netease: false, qq: false, soda: false },
   error: '',
   updatedAt: 0
 };
@@ -247,9 +251,11 @@ function installStartupLongTaskObserver() {
 }
 installStartupLongTaskObserver();
 var queueViewTab = 'queue', playMode = 'loop', miniQueueOpen = false;
+var shufflePlayedKeys = Object.create(null), shufflePlayedOrder = [], shuffleBackStack = [], shuffleQueueSignature = '';
 var miniQueueRenderSeq = 0, queueRenderSeq = 0, playlistRenderSeq = 0;
 var queuePanelDirty = false;
 var PLAYLIST_PANEL_BATCH_SIZE = 28;
+var MINI_QUEUE_RENDER_LIMIT = 120;
 var playlistPanelRenderLimit = PLAYLIST_PANEL_BATCH_SIZE;
 var playlistPanelLazyBound = false;
 var PLAYLIST_DETAIL_INITIAL_RENDER = 64;
@@ -459,8 +465,10 @@ function applyDiyMode(on, opts) {
     closeUploadTip(false);
     var quality = document.getElementById('quality-control');
     var volume = document.getElementById('volume-control');
+    var speed = document.getElementById('speed-control');
     if (quality) quality.classList.remove('open');
     if (volume) volume.classList.remove('open');
+    if (speed) speed.classList.remove('open');
   }
   if (opts.toast) showToast(diyPlayerMode ? 'DIY 玩家模式已开启' : '已切回简约模式');
   if (opts.animate && window.gsap) {
@@ -480,6 +488,8 @@ function toggleDiyMode() {
 var targetVolume = readSavedVolume();
 var lastNonZeroVolume = targetVolume > 0.01 ? targetVolume : 0.8;
 var volumeCloseTimer = null;
+var playbackRate = readSavedPlaybackRate();
+var playbackRateCloseTimer = null;
 
 // v7.2: 离线节拍预解析
 //   每次切歌, fetch 完整音频 → OfflineAudioContext 分析 → 标出真鼓点
@@ -5115,7 +5125,7 @@ function readSavedLyricLayout() {
       shelfOpacity: clampRange(raw.shelfOpacity == null ? fxDefaults.shelfOpacity : Number(raw.shelfOpacity), 0.25, 1),
       shelfBgOpacity: clampRange(raw.shelfBgOpacity == null ? fxDefaults.shelfBgOpacity : Number(raw.shelfBgOpacity), 0.25, 0.98),
       shelfAccentColor: normalizeHexColor(raw.shelfAccentColor || fxDefaults.shelfAccentColor, fxDefaults.shelfAccentColor),
-      cam: /^(off|gesture)$/.test(String(raw.cam || '')) ? raw.cam : fxDefaults.cam
+      cam: fxDefaults.cam
     };
   } catch (e) {
     return {};
@@ -5212,7 +5222,7 @@ function saveLyricLayout() {
       shelfOpacity: clampRange(fx.shelfOpacity == null ? fxDefaults.shelfOpacity : Number(fx.shelfOpacity), 0.25, 1),
       shelfBgOpacity: clampRange(fx.shelfBgOpacity == null ? fxDefaults.shelfBgOpacity : Number(fx.shelfBgOpacity), 0.25, 0.98),
       shelfAccentColor: normalizeHexColor(fx.shelfAccentColor || fxDefaults.shelfAccentColor, fxDefaults.shelfAccentColor),
-      cam: /^(off|gesture)$/.test(String(fx.cam || '')) ? fx.cam : fxDefaults.cam
+      cam: fxDefaults.cam
     }));
   } catch (e) {}
 }
@@ -5961,22 +5971,51 @@ function lyricThreeColor(css, fallback, minLum) {
   return c;
 }
 
-var STAGE_LYRIC_MAX_LINES = 1;
+var STAGE_LYRIC_MAX_LINES = 2;
+
+function normalizeStageLyricTextLine(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function stageLyricTextLines(text, maxLines) {
+  maxLines = Math.max(1, maxLines || STAGE_LYRIC_MAX_LINES);
+  var explicit = String(text || '')
+    .split(/\r?\n/)
+    .map(normalizeStageLyricTextLine)
+    .filter(Boolean);
+  if (explicit.length > 1) return explicit.slice(0, maxLines);
+  var single = normalizeStageLyricTextLine(explicit[0] || text || '');
+  return single ? [single] : [''];
+}
+
+function stageLyricDisplayTextForIndex(index) {
+  var cur = lyricsLines[index] || null;
+  var currentText = normalizeStageLyricTextLine(cur && cur.text);
+  if (!currentText) return '';
+  var next = lyricsLines[index + 1] || null;
+  var nextText = normalizeStageLyricTextLine(next && next.text);
+  if (!nextText || (next && next.fallback) || nextText === currentText) return currentText;
+  return currentText + '\n' + nextText;
+}
 
 function makeLyricMask(text) {
   var canvas = document.createElement('canvas');
-  var W = 2048, H = 384;
+  var W = 2048, H = 448;
   canvas.width = W; canvas.height = H;
   var ctx = canvas.getContext('2d');
-  var maxWidth = W - 190;
+  var maxWidth = W - 230;
   var maxLines = STAGE_LYRIC_MAX_LINES;
   var fontSize = 128;
-  text = String(text || '').replace(/\s+/g, ' ').trim();
-  var lines = [text];
+  var explicitLines = stageLyricTextLines(text, maxLines);
+  text = explicitLines.join(' ');
+  var hasExplicitLines = explicitLines.length > 1;
+  var lines = explicitLines.slice();
   var widest = 1;
   for (; fontSize >= 42; fontSize -= 4) {
     ctx.font = lyricFontCss(fontSize);
-    lines = maxLines > 1 && lyricMeasureText(ctx, text, fontSize) > maxWidth ? wrapLyricText(ctx, text, maxWidth, maxLines, fontSize) : [text];
+    lines = hasExplicitLines
+      ? explicitLines.slice(0, maxLines)
+      : (maxLines > 1 && lyricMeasureText(ctx, text, fontSize) > maxWidth ? wrapLyricText(ctx, text, maxWidth, maxLines, fontSize) : [text]);
     widest = 1;
     for (var li = 0; li < lines.length; li++) widest = Math.max(widest, lyricMeasureText(ctx, lines[li], fontSize));
     if (widest <= maxWidth) break;
@@ -5986,16 +6025,18 @@ function makeLyricMask(text) {
   widest = 1;
   for (var mi = 0; mi < lines.length; mi++) widest = Math.max(widest, lyricMeasureText(ctx, lines[mi], fontSize));
   var width = Math.min(maxWidth, widest);
-  var fitScaleX = maxLines <= 1 && widest > maxWidth ? Math.max(0.68, maxWidth / widest) : 1;
+  var fitScaleX = widest > maxWidth ? Math.max(0.68, maxWidth / widest) : 1;
   if (fitScaleX < 1) width = Math.min(maxWidth, widest * fitScaleX);
-  var lineHeight = fontSize * (lines.length > 1 ? 1.02 : 1.0) * lyricLineHeightFactor();
+  var mainTextWidth = Math.max(1, lyricMeasureText(ctx, lines[0] || '', fontSize) * fitScaleX);
+  mainTextWidth = Math.min(maxWidth, mainTextWidth);
+  var lineHeight = fontSize * (lines.length > 1 ? 0.98 : 1.0) * lyricLineHeightFactor();
   var blockH = fontSize + (lines.length - 1) * lineHeight;
   var x = W / 2, y0 = H / 2 - blockH / 2 + fontSize * 0.82;
   ctx.clearRect(0, 0, W, H);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = '#fff';
   for (var di = 0; di < lines.length; di++) {
+    ctx.fillStyle = di === 0 ? 'rgba(255,0,0,1)' : 'rgba(0,255,0,1)';
     if (fitScaleX < 1) {
       ctx.save();
       ctx.translate(x, 0);
@@ -6012,7 +6053,21 @@ function makeLyricMask(text) {
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;
   tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 1);
-  return { texture:tex, width:W, height:H, textWidth:width, textHeight:blockH, fontSize:fontSize, lineHeight:lineHeight, lineCount:lines.length, lines:lines, fitScaleX:fitScaleX, textMin:(W / 2 - width / 2) / W, textMax:(W / 2 + width / 2) / W };
+  return {
+    texture:tex,
+    width:W,
+    height:H,
+    textWidth:width,
+    mainTextWidth:mainTextWidth,
+    textHeight:blockH,
+    fontSize:fontSize,
+    lineHeight:lineHeight,
+    lineCount:lines.length,
+    lines:lines,
+    fitScaleX:fitScaleX,
+    textMin:(W / 2 - mainTextWidth / 2) / W,
+    textMax:(W / 2 + mainTextWidth / 2) / W
+  };
 }
 
 function makeLyricReadabilityTexture(mask) {
@@ -6035,7 +6090,9 @@ function makeLyricReadabilityTexture(mask) {
   var blockH = fontSize + (lines.length - 1) * lineHeight;
   var y0 = H / 2 - blockH / 2 + fontSize * 0.82;
   function strokeLines(dx, dy) {
+    var baseAlpha = ctx.globalAlpha;
     for (var i = 0; i < lines.length; i++) {
+      ctx.globalAlpha = baseAlpha * (i > 0 ? 0.48 : 1);
       var y = y0 + i * lineHeight + (dy || 0);
       if (fitScaleX < 1) {
         ctx.save();
@@ -6047,6 +6104,7 @@ function makeLyricReadabilityTexture(mask) {
         lyricStrokeText(ctx, lines[i], W / 2 + (dx || 0), y, fontSize);
       }
     }
+    ctx.globalAlpha = baseAlpha;
   }
 
   // Black/white readability layer: text-shaped only, no rectangular backing.
@@ -6114,7 +6172,9 @@ function makeLyricGlowTexture(text, fontSize, textWidth, lines, lineHeight, fitS
   ctx.font = lyricFontCss(fontSize);
   var y0 = H / 2 - blockH / 2 + fontSize * 0.82;
   function drawGlowText(dx, dy) {
+    var baseAlpha = ctx.globalAlpha;
     for (var i = 0; i < drawLines.length; i++) {
+      ctx.globalAlpha = baseAlpha * (i > 0 ? 0.38 : 1);
       var y = y0 + i * lh + (dy || 0);
       if (fitScaleX < 1) {
         ctx.save();
@@ -6128,6 +6188,7 @@ function makeLyricGlowTexture(text, fontSize, textWidth, lines, lineHeight, fitS
         lyricFillText(ctx, drawLines[i], W / 2 + (dx || 0), y, fontSize);
       }
     }
+    ctx.globalAlpha = baseAlpha;
   }
   ctx.save();
   ctx.filter = 'blur(14px)';
@@ -6273,29 +6334,38 @@ function makeLyricShaderMaterial(mask, pal) {
       uSolarColor: { value: lyricThreeColor(pal.highlight || pal.secondary || pal.primary, '#fff0b8', 0.50) },
       uFeather: { value: lyricsHasNativeKaraoke ? 0.030 : 0.055 },
       uSolar: { value: 0 },
+      uPreviewOpacity: { value: mask.lineCount > 1 ? 1 : 0 },
     },
     vertexShader: 'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
     fragmentShader: [
       'precision highp float;',
       'uniform sampler2D uMap;',
-      'uniform float uProgress,uTextMin,uTextMax,uOpacity,uFeather,uSolar;',
+      'uniform float uProgress,uTextMin,uTextMax,uOpacity,uFeather,uSolar,uPreviewOpacity;',
       'uniform vec3 uBaseColor,uHiColor,uGlowColor,uSolarColor;',
       'varying vec2 vUv;',
       'void main(){',
       '  vec2 uv = gl_FrontFacing ? vUv : vec2(1.0 - vUv.x, vUv.y);',
-      '  float mask = texture2D(uMap, uv).a;',
+      '  vec4 tex = texture2D(uMap, uv);',
+      '  float mainMask = tex.r * tex.a;',
+      '  float previewMask = tex.g * tex.a * uPreviewOpacity;',
+      '  float mask = max(mainMask, previewMask * 0.46);',
       '  if(mask < 0.01) discard;',
       '  float denom = max(0.001, uTextMax - uTextMin);',
       '  float p = clamp((uv.x - uTextMin) / denom, 0.0, 1.0);',
       '  float filled = 1.0 - smoothstep(uProgress, uProgress + uFeather, p);',
-      '  float edge = 1.0 - smoothstep(0.0, uFeather * 2.8, abs(p - uProgress));',
-      '  vec3 color = mix(uBaseColor, uHiColor, filled * 0.88);',
-      '  color += uGlowColor * edge * 0.14;',
+      '  float edge = (1.0 - smoothstep(0.0, uFeather * 2.8, abs(p - uProgress))) * step(0.001, mainMask);',
+      '  vec3 mainColor = mix(uBaseColor, uHiColor, filled * 0.88);',
+      '  mainColor += uGlowColor * edge * 0.14;',
       '  vec3 solar = uSolarColor;',
-      '  color = mix(color, color + solar * 0.34, uSolar * (0.25 + filled * 0.45));',
-      '  color += solar * edge * uSolar * 0.22;',
+      '  mainColor = mix(mainColor, mainColor + solar * 0.34, uSolar * (0.25 + filled * 0.45));',
+      '  mainColor += solar * edge * uSolar * 0.22;',
+      '  vec3 previewColor = mix(uBaseColor, uGlowColor, 0.18) * 0.68;',
+      '  previewColor = mix(previewColor, uBaseColor, 0.22);',
+      '  float mainAlpha = mainMask;',
+      '  float previewAlpha = previewMask * 0.46;',
+      '  vec3 color = (mainColor * mainAlpha + previewColor * previewAlpha) / max(0.001, mainAlpha + previewAlpha);',
       '  float lum = dot(color, vec3(0.299, 0.587, 0.114));',
-      '  color += vec3(max(0.0, 0.30 - lum));',
+      '  color += vec3(max(0.0, 0.24 - lum));',
       '  gl_FragColor = vec4(color, mask * uOpacity);',
       '}',
     ].join('\n'),
@@ -6304,10 +6374,10 @@ function makeLyricShaderMaterial(mask, pal) {
 }
 
 function buildLyricMesh(text) {
-  text = String(text || '').replace(/\s+/g, ' ').trim();
+  text = stageLyricTextLines(text, STAGE_LYRIC_MAX_LINES).join('\n');
   var mask = makeLyricMask(text);
   var pal = stageLyrics.palette;
-  var worldW = 6.10;
+  var worldW = mask.lineCount > 1 ? 5.82 : 6.10;
   var worldH = worldW * (mask.height / mask.width);
   var geo = new THREE.PlaneGeometry(worldW, worldH, 1, 1);
   var textWorldW = worldW * (mask.textWidth / mask.width);
@@ -6440,6 +6510,14 @@ function updateLyricMeshProgress(mesh, progress) {
   mesh.userData.lastLyricProgress = progress;
 }
 
+function setLyricMeshPreviewOpacity(mesh, value) {
+  if (!mesh || !mesh.userData || !mesh.userData.lyric) return;
+  var d = mesh.userData.lyric;
+  if (d.textMat && d.textMat.uniforms && d.textMat.uniforms.uPreviewOpacity) {
+    d.textMat.uniforms.uPreviewOpacity.value = clampRange(Number(value) || 0, 0, 1);
+  }
+}
+
 function showStageLine(text, redrawOnly) {
   createLyricsParticles();
   if (!stageLyrics.group) return;
@@ -6448,6 +6526,7 @@ function showStageLine(text, redrawOnly) {
     disposeLyricMesh(stageLyrics.current);
     stageLyrics.current = null;
   } else if (stageLyrics.current) {
+    setLyricMeshPreviewOpacity(stageLyrics.current, 0);
     stageLyrics.current.userData.state = 'out';
     stageLyrics.current.userData.age = 0;
     stageLyrics.outgoing.push(stageLyrics.current);
@@ -6831,7 +6910,7 @@ function tickLyricsParticles() {
   }
   if (newIdx !== stageLyrics.currentIdx) {
     stageLyrics.currentIdx = newIdx;
-    showStageLine(lyricsLines[newIdx].text || '');
+    showStageLine(stageLyricDisplayTextForIndex(newIdx));
   }
   if (stageLyrics.current) {
     var curLine = lyricsLines[newIdx] || { t:t };
@@ -13371,7 +13450,7 @@ function restoreLastPlaybackState() {
   setHomeControlsLocked(false);
   activeRadioContext = null;
   playQueue = [cloneSong(song)];
-  currentIdx = 0;
+  currentIdx = playQueue.length ? 0 : -1;
   safeRenderQueuePanel('restore-last-playback', { scrollCurrent: false });
   safeShelfRebuild('restore-last-playback', true);
   forcePlaybackControlsInteractive();
@@ -13748,7 +13827,54 @@ function clearHomeDiscoverPayload() {
   homeDiscoverState.millionSongs = [];
   homeDiscoverState.artistRoamSongs = [];
   homeDiscoverState.recommendationSongs = [];
+  homeDiscoverState.dailyByProvider = { netease: [], qq: [], soda: [] };
+  homeDiscoverState.providerLoggedIn = { netease: false, qq: false, soda: false };
   homeDiscoverState.updatedAt = 0;
+}
+function normalizeHomeProviderKey(provider) {
+  return provider === 'qq' || provider === 'soda' ? provider : 'netease';
+}
+function cloneHomeProviderSongMap(raw, fallbackProvider, fallbackSongs) {
+  var out = { netease: [], qq: [], soda: [] };
+  raw = raw && typeof raw === 'object' ? raw : {};
+  ['netease', 'qq', 'soda'].forEach(function(provider){
+    out[provider] = (Array.isArray(raw[provider]) ? raw[provider] : []).map(cloneSong);
+  });
+  if ((fallbackProvider === 'netease' || fallbackProvider === 'qq' || fallbackProvider === 'soda') && Array.isArray(fallbackSongs) && fallbackSongs.length) {
+    out[normalizeHomeProviderKey(fallbackProvider)] = fallbackSongs.map(cloneSong);
+  }
+  return out;
+}
+function normalizeHomeProviderLoggedIn(raw, fallbackProvider, fallbackLoggedIn) {
+  raw = raw && typeof raw === 'object' ? raw : {};
+  var out = {
+    netease: !!raw.netease,
+    qq: !!raw.qq,
+    soda: !!raw.soda
+  };
+  if (fallbackProvider === 'netease' || fallbackProvider === 'qq' || fallbackProvider === 'soda') out[normalizeHomeProviderKey(fallbackProvider)] = !!fallbackLoggedIn;
+  return out;
+}
+function homeDailySongsForProvider(provider) {
+  provider = normalizeHomeProviderKey(provider);
+  var grouped = homeDiscoverState.dailyByProvider || {};
+  var songs = Array.isArray(grouped[provider]) ? grouped[provider] : [];
+  if (!songs.length && homeDiscoverState.provider === provider) songs = homeDiscoverState.songs || [];
+  return songs;
+}
+function homeDailyProviderLoggedIn(provider) {
+  provider = normalizeHomeProviderKey(provider);
+  var map = homeDiscoverState.providerLoggedIn || {};
+  return !!map[provider] || hasPlatformLogin(provider);
+}
+function firstHomeDailySong(provider) {
+  return firstHomeSong(homeDailySongsForProvider(provider));
+}
+function homeDailySubForProvider(provider, songs, loadingText) {
+  provider = normalizeHomeProviderKey(provider);
+  var label = accountScopeLabel(provider);
+  if (!homeDailyProviderLoggedIn(provider)) return '登录' + label + '后同步每日推荐';
+  return songs && songs.length ? (songs.length + ' 首 · 点击展开今日歌曲') : (loadingText || ('正在同步' + label + '每日推荐'));
 }
 function renderNeteaseHomeCards(loggedOutHome) {
   var dailySongs = homeDiscoverState.songs || [];
@@ -13835,11 +13961,11 @@ function renderSodaHomeCards(loggedOutHome) {
   var heartSong = firstHomeSong(heartSongs);
   var similarSong = firstHomeSong(similarSongs);
 
-  setHomeCardLabels({ library: 'PLAYLIST', daily: 'LIKED', radar: 'RADAR', newSong: 'NEW', heart: 'FLOW', similar: 'SIMILAR' });
+  setHomeCardLabels({ library: 'PLAYLIST', daily: 'DAILY', radar: 'RADAR', newSong: 'NEW', heart: 'FLOW', similar: 'SIMILAR' });
   setHomeDashboardText('home-weather-card-title', '我的歌单');
   setHomeDashboardText('home-weather-card-sub', userPlaylist ? (((userPlaylist.trackCount || 0) ? userPlaylist.trackCount + ' 首 · ' : '') + '打开左侧歌单列表') : '打开左侧歌单列表');
-  setHomeDashboardText('home-daily-title', '我喜欢的音乐');
-  setHomeDashboardText('home-daily-sub', loggedOutHome ? '登录汽水音乐后同步喜欢的音乐' : (dailySongs.length ? dailySongs.length + ' 首 · 点击展开汽水歌曲' : '正在同步汽水音乐歌单'));
+  setHomeDashboardText('home-daily-title', '汽水每日推荐');
+  setHomeDashboardText('home-daily-sub', loggedOutHome ? '登录汽水音乐后同步每日推荐' : (dailySongs.length ? dailySongs.length + ' 首 · 点击展开今日歌曲' : '正在同步汽水音乐每日推荐'));
   setHomeDashboardText('home-private-title', '汽水雷达');
   setHomeDashboardText('home-private-sub', loggedOutHome ? '登录汽水音乐后同步推荐歌曲' : (radarSongs.length ? radarSongs.length + ' 首 · 点击展开歌曲' : '正在同步汽水音乐雷达'));
   setHomeDashboardText('home-continue-title', '新歌推荐');
@@ -13855,6 +13981,38 @@ function renderSodaHomeCards(loggedOutHome) {
   setHomeArt('home-continue-art', newSong && newSong.cover || dailySong && dailySong.cover, 280);
   setHomeArt('home-profile-art', heartSong && heartSong.cover || radarSong && radarSong.cover || dailySong && dailySong.cover, 280);
   setHomeArt('home-library-art', similarSong && similarSong.cover || newSong && newSong.cover || dailySong && dailySong.cover, 280);
+  renderHomeTiles();
+}
+function renderAllProviderDailyCards(loggedOutHome, summary, playlistItem) {
+  var neSongs = homeDailySongsForProvider('netease');
+  var qqSongs = homeDailySongsForProvider('qq');
+  var sodaSongs = homeDailySongsForProvider('soda');
+  var neSong = firstHomeSong(neSongs);
+  var qqSong = firstHomeSong(qqSongs);
+  var sodaSong = firstHomeSong(sodaSongs);
+  var newSong = firstHomeSong(homeDiscoverState.newSongs || []);
+  var recommendSong = firstHomeSong(homeDiscoverState.recommendationSongs || []);
+  var userPlaylist = visibleUserPlaylists('all')[0] || playlistItem || null;
+
+  setHomeCardLabels({ library: 'PLAYLIST', daily: 'NETEASE', radar: 'QQ DAILY', newSong: 'SODA', heart: 'NEW', similar: 'MIX' });
+  setHomeDashboardText('home-weather-card-title', '我的歌单');
+  setHomeDashboardText('home-weather-card-sub', userPlaylist ? (((userPlaylist.trackCount || 0) ? userPlaylist.trackCount + ' 首 · ' : '') + '打开左侧歌单列表') : '打开左侧歌单列表');
+  setHomeDashboardText('home-daily-title', '网易云每日推荐');
+  setHomeDashboardText('home-daily-sub', loggedOutHome ? '登录网易云后同步每日推荐' : homeDailySubForProvider('netease', neSongs));
+  setHomeDashboardText('home-private-title', 'QQ 每日30首');
+  setHomeDashboardText('home-private-sub', loggedOutHome ? '登录 QQ 音乐后同步每日推荐' : homeDailySubForProvider('qq', qqSongs));
+  setHomeDashboardText('home-continue-title', '汽水每日推荐');
+  setHomeDashboardText('home-continue-sub', loggedOutHome ? '登录汽水音乐后同步每日推荐' : homeDailySubForProvider('soda', sodaSongs));
+  setHomeDashboardText('home-profile-title', newSong ? '多端新歌' : (summary.topArtist ? summary.topArtist.name : '多端新歌'));
+  setHomeDashboardText('home-profile-sub', newSong ? neteaseHomeSongSub(newSong, '点击播放多端新歌队列') : (summary.topArtist ? ('常听歌手 · ' + summary.topArtist.plays + ' 次') : '聚合各端新歌推荐'));
+  setHomeDashboardText('home-library-title', recommendSong ? '多端推荐' : '更多推荐');
+  setHomeDashboardText('home-library-sub', recommendSong ? neteaseHomeSongSub(recommendSong, '聚合三端推荐') : '继续浏览三端推荐池');
+  setHomeArt('home-weather-art', userPlaylist && userPlaylist.cover || neSong && neSong.cover || qqSong && qqSong.cover || sodaSong && sodaSong.cover, 280);
+  setHomeArt('home-daily-art', neSong && neSong.cover, 280);
+  setHomeArt('home-private-art', qqSong && qqSong.cover, 280);
+  setHomeArt('home-continue-art', sodaSong && sodaSong.cover, 280);
+  setHomeArt('home-profile-art', newSong && newSong.cover || qqSong && qqSong.cover || neSong && neSong.cover, 280);
+  setHomeArt('home-library-art', recommendSong && recommendSong.cover || sodaSong && sodaSong.cover || newSong && newSong.cover, 280);
   renderHomeTiles();
 }
 function renderHomeDiscover() {
@@ -13920,6 +14078,10 @@ function renderHomeDiscover() {
     renderSodaHomeCards(!hasPlatformLogin('soda') && !homeDiscoverState.loggedIn);
     return;
   }
+  if (scope === 'all') {
+    renderAllProviderDailyCards(loggedOutHome, summary, playlistItem);
+    return;
+  }
   setHomeCardLabels();
   if (weatherCardTitle) weatherCardTitle.textContent = '我的歌单';
   if (weatherCardSub) {
@@ -13980,6 +14142,10 @@ async function loadHomeDiscover(force) {
     homeDiscoverState.mode = data && data.mode || (homeDiscoverState.loggedIn ? 'member' : 'starter');
     homeDiscoverState.provider = data && data.provider || provider;
     homeDiscoverState.songs = homeDiscoverState.loggedIn ? (data && data.dailySongs || []).map(cloneSong) : [];
+    homeDiscoverState.dailyByProvider = homeDiscoverState.loggedIn
+      ? cloneHomeProviderSongMap(data && data.dailyByProvider, homeDiscoverState.provider, homeDiscoverState.songs)
+      : { netease: [], qq: [], soda: [] };
+    homeDiscoverState.providerLoggedIn = normalizeHomeProviderLoggedIn(data && data.providerLoggedIn, homeDiscoverState.provider, homeDiscoverState.loggedIn);
     homeDiscoverState.playlists = homeDiscoverState.loggedIn ? (data && data.playlists || []) : [];
     homeDiscoverState.podcasts = homeDiscoverState.loggedIn ? (data && data.podcasts || []) : [];
     homeDiscoverState.radarPlaylist = homeDiscoverState.loggedIn ? (data && data.radarPlaylist || null) : null;
@@ -14127,7 +14293,7 @@ async function startWeatherRadio(opts) {
     await playQueueAt(0, { context: activeRadioContext });
   } catch (e) {
     console.warn('[WeatherRadioStartPlay]', e);
-    showToast('天气电台已载入，播放启动失败');
+    showToast('天气电台已载入，播放器已恢复可操作');
   }
   forcePlaybackControlsInteractive();
   showToast((radio.title || '天气电台') + ' · ' + playQueue.length + ' 首');
@@ -14711,6 +14877,8 @@ function updateEmptyHomeVisibility(opts) {
       homeDiscoverState.millionSongs = [];
       homeDiscoverState.artistRoamSongs = [];
       homeDiscoverState.recommendationSongs = [];
+      homeDiscoverState.dailyByProvider = { netease: [], qq: [], soda: [] };
+      homeDiscoverState.providerLoggedIn = { netease: false, qq: false, soda: false };
       renderHomeDiscover();
     } else {
       renderHomeDiscover();
@@ -14817,7 +14985,8 @@ function playHomeSongList(songs, index, context) {
 function closeHomeListModal() {
   closeGsapModal(document.getElementById('home-list-modal'));
 }
-function renderHomeListModal(kind, songs) {
+function renderHomeListModal(kind, songs, opts) {
+  opts = opts || {};
   var modal = document.getElementById('home-list-modal');
   var title = document.getElementById('home-list-title');
   var kicker = document.getElementById('home-list-kicker');
@@ -14826,16 +14995,16 @@ function renderHomeListModal(kind, songs) {
   if (!modal || !body) return;
   var isRadar = kind === 'radar';
   var isMillion = kind === 'million';
-  var scope = currentAccountScope();
+  var scope = opts.provider ? normalizeHomeProviderKey(opts.provider) : currentAccountScope();
   var isQQ = scope === 'qq';
   var isSoda = scope === 'soda';
-  homeListModalState = { kind: kind, songs: songs || [] };
+  homeListModalState = { kind: kind, songs: songs || [], provider: scope };
   if (kicker) {
-    if (isSoda) kicker.textContent = kind === 'daily' ? 'SODA LIKED' : (kind === 'new' ? 'SODA NEW' : (kind === 'heart' ? 'SODA FLOW' : (kind === 'similar' ? 'SODA SIMILAR' : 'SODA RADAR')));
+    if (isSoda) kicker.textContent = kind === 'daily' ? 'SODA DAILY' : (kind === 'new' ? 'SODA NEW' : (kind === 'heart' ? 'SODA FLOW' : (kind === 'similar' ? 'SODA SIMILAR' : 'SODA RADAR')));
     else kicker.textContent = isQQ ? (isMillion ? 'QQ COLLECTION' : 'QQ DAILY 30') : (isRadar ? 'RADAR PLAYLIST' : 'DAILY SONGS');
   }
   if (title) {
-    if (isSoda) title.textContent = kind === 'daily' ? '我喜欢的音乐' : (kind === 'new' ? '新歌推荐' : (kind === 'heart' ? '私人推荐' : (kind === 'similar' ? '相似歌曲' : '汽水雷达')));
+    if (isSoda) title.textContent = kind === 'daily' ? '汽水每日推荐' : (kind === 'new' ? '新歌推荐' : (kind === 'heart' ? '私人推荐' : (kind === 'similar' ? '相似歌曲' : '汽水雷达')));
     else title.textContent = isQQ ? (isMillion ? '百万收藏' : '每日30首') : (isRadar ? '雷达歌单' : '每日推荐');
   }
   if (sub) {
@@ -14959,32 +15128,60 @@ function playSodaHomeDirect(kind, fallbackQuery) {
     runHomeSearch(fallbackQuery || '汽水音乐推荐');
   });
 }
+async function openProviderDailyHomeList(provider) {
+  provider = normalizeHomeProviderKey(provider);
+  if (!hasPlatformLogin(provider)) {
+    showLoginModal({ source: 'home-daily-' + provider, provider: provider });
+    return;
+  }
+  await ensureHomeDiscoverReady();
+  var songs = homeDailySongsForProvider(provider);
+  if (!songs.length) {
+    await loadHomeDiscover(true);
+    songs = homeDailySongsForProvider(provider);
+  }
+  renderHomeListModal('daily', songs, { provider: provider });
+  openGsapModal(document.getElementById('home-list-modal'));
+}
 function openHomeDailyCard() {
-  if (isNeteaseHomeScope()) openNeteaseHomeList('daily');
+  if (currentAccountScope() === 'all') openProviderDailyHomeList('netease');
+  else if (isNeteaseHomeScope()) openNeteaseHomeList('daily');
   else if (isQQHomeScope()) openQQHomeList('daily');
   else if (isSodaHomeScope()) openSodaHomeList('daily');
   else playHomeDaily();
 }
 function openHomeRadarCard() {
-  if (isNeteaseHomeScope()) openNeteaseHomeList('radar');
+  if (currentAccountScope() === 'all') openProviderDailyHomeList('qq');
+  else if (isNeteaseHomeScope()) openNeteaseHomeList('radar');
   else if (isQQHomeScope()) openQQHomeList('million');
   else if (isSodaHomeScope()) openSodaHomeList('radar');
   else playHomePrivateRadio();
 }
 function playHomeNewSongs() {
-  if (isNeteaseHomeScope()) playNeteaseHomeDirect('new', '新歌首发');
+  if (currentAccountScope() === 'all') openProviderDailyHomeList('soda');
+  else if (isNeteaseHomeScope()) playNeteaseHomeDirect('new', '新歌首发');
   else if (isQQHomeScope()) playQQHomeDirect('radar', '雷达模式');
   else if (isSodaHomeScope()) playSodaHomeDirect('new', '新歌推荐');
   else playHomeRecent();
 }
 function playHomeHeartMode() {
-  if (isNeteaseHomeScope()) playNeteaseHomeDirect('heart', '心动模式');
+  if (currentAccountScope() === 'all') {
+    var allNewSongs = homeDiscoverState.newSongs || [];
+    if (allNewSongs.length && playHomeSongList(allNewSongs, 0, 'home-all-new')) return;
+    openHomeInsight();
+  }
+  else if (isNeteaseHomeScope()) playNeteaseHomeDirect('heart', '心动模式');
   else if (isQQHomeScope()) playQQHomeDirect('new', '新歌推荐');
   else if (isSodaHomeScope()) playSodaHomeDirect('heart', '汽水私人推荐');
   else openHomeInsight();
 }
 function playHomeSimilarSongs() {
-  if (isNeteaseHomeScope()) playNeteaseHomeDirect('similar', '相似歌曲');
+  if (currentAccountScope() === 'all') {
+    var allRecommendSongs = (homeDiscoverState.recommendationSongs || []).length ? homeDiscoverState.recommendationSongs : (homeDiscoverState.similarSongs || []);
+    if (allRecommendSongs.length && playHomeSongList(allRecommendSongs, 0, 'home-all-recommend')) return;
+    playHomeSong(2);
+  }
+  else if (isNeteaseHomeScope()) playNeteaseHomeDirect('similar', '相似歌曲');
   else if (isQQHomeScope()) playQQHomeDirect('artist', '歌手漫游');
   else if (isSodaHomeScope()) playSodaHomeDirect('similar', '相似歌曲');
   else playHomeSong(2);
@@ -16474,8 +16671,68 @@ function isCloudSong(song) {
   if (song.type === 'local' || song.type === 'podcast' || song.source === 'podcast') return false;
   return !song.provider || song.provider === 'netease' || song.source === 'netease' || song.type === 'song';
 }
+function songLikeProvider(song) {
+  if (!song) return '';
+  var provider = songProviderKey(song);
+  if (provider === 'qq' || provider === 'soda') return provider;
+  return isCloudSong(song) ? 'netease' : '';
+}
+function songLikeRawId(song, provider) {
+  if (!song) return '';
+  provider = provider || songLikeProvider(song);
+  if (provider === 'qq') return String(song.mid || song.songmid || song.songMid || song.qqId || song.id || '').trim();
+  if (provider === 'soda') return String(song.sodaId || song.id || song.trackId || song.vid || '').trim();
+  if (provider === 'netease') return String(song.id || '').trim();
+  return '';
+}
+function songLikeKey(song, provider) {
+  provider = provider || songLikeProvider(song);
+  var id = songLikeRawId(song, provider);
+  return provider && id ? (provider + ':' + id) : '';
+}
+function songQQSongType(song) {
+  if (!song) return '';
+  var keys = ['songType', 'songtype', 'qqSongType', 'qqType'];
+  for (var i = 0; i < keys.length; i++) {
+    var value = song[keys[i]];
+    if (value === undefined || value === null || value === '') continue;
+    var text = String(value).trim();
+    if (/^-?\d+$/.test(text)) return Number(text);
+  }
+  return '';
+}
+function providerLikeCheckEndpoint(provider) {
+  if (provider === 'qq') return '/api/qq/song/like/check';
+  if (provider === 'soda') return '/api/soda/song/like/check';
+  return '/api/song/like/check';
+}
+function providerLikeToggleEndpoint(provider) {
+  if (provider === 'qq') return '/api/qq/song/like';
+  if (provider === 'soda') return '/api/soda/song/like';
+  return '/api/song/like';
+}
+function providerPlaylistTracksEndpoint(provider) {
+  if (provider === 'qq') return '/api/qq/playlist/tracks';
+  if (provider === 'soda') return '/api/soda/playlist/tracks';
+  return '/api/playlist/tracks';
+}
+function providerPlaylistAddEndpoint(provider) {
+  if (provider === 'qq') return '/api/qq/playlist/add-song';
+  if (provider === 'soda') return '/api/soda/playlist/add-song';
+  return '/api/playlist/add-song';
+}
+function ensureLoggedInForProviderAction(provider) {
+  provider = normalizeMusicProvider(provider);
+  var status = platformStatus(provider);
+  if (status && status.loggedIn) return true;
+  var label = provider === 'qq' ? 'QQ 音乐' : (provider === 'soda' ? '汽水音乐' : '网易云音乐');
+  showToast('登录 ' + label + ' 后可同步');
+  showLoginModal({ provider: provider });
+  return false;
+}
 function isSongLiked(song) {
-  return !!(song && song.id && likedSongMap[String(song.id)]);
+  var key = songLikeKey(song);
+  return !!(key && likedSongMap[key]);
 }
 function ensureLoggedInForAction() {
   if (loginStatus.loggedIn) return true;
@@ -16486,7 +16743,8 @@ function ensureLoggedInForAction() {
 function updateLikeButtons(song) {
   song = song || currentCoverSong();
   var liked = isSongLiked(song);
-  var busy = !!(song && song.id && likeBusyMap[String(song.id)]);
+  var likeKey = songLikeKey(song);
+  var busy = !!(likeKey && likeBusyMap[likeKey]);
   var btn = document.getElementById('heart-btn');
   if (btn) {
     btn.classList.toggle('liked', liked);
@@ -16516,20 +16774,40 @@ function songActionHtml(kind, source, index, song) {
   return '<button class="song-action-btn" title="收藏到歌单" onclick="event.stopPropagation();collect' + source + '(' + index + ')">' + playlistPlusIconSvg() + '</button>';
 }
 function syncLikeStatusForSongs(songs) {
-  if (!loginStatus.loggedIn || !songs || !songs.length) return;
-  var ids = songs.filter(isCloudSong).map(function(s){ return String(s.id); });
-  if (!ids.length) return;
+  if (!songs || !songs.length) return;
+  var groups = {};
+  (songs || []).forEach(function(song){
+    var provider = songLikeProvider(song);
+    if (!provider) return;
+    var status = platformStatus(provider);
+    if (!status || !status.loggedIn) return;
+    var id = songLikeRawId(song, provider);
+    var key = songLikeKey(song, provider);
+    if (!id || !key) return;
+    if (!groups[provider]) groups[provider] = [];
+    if (!groups[provider].some(function(item){ return item.id === id; })) groups[provider].push({ id: id, key: key });
+  });
+  var providers = Object.keys(groups).filter(function(provider){ return groups[provider] && groups[provider].length; });
+  if (!providers.length) return;
   var token = ++likeStatusToken;
-  apiJson('/api/song/like/check?ids=' + encodeURIComponent(ids.join(','))).then(function(r){
-    if (token < likeStatusToken - 3 || !r || !r.liked) return;
-    Object.keys(r.liked).forEach(function(id){ likedSongMap[String(id)] = !!r.liked[id]; });
+  Promise.all(providers.map(function(provider){
+    var items = groups[provider];
+    var ids = items.map(function(item){ return item.id; });
+    return apiJson(providerLikeCheckEndpoint(provider) + '?ids=' + encodeURIComponent(ids.join(','))).then(function(r){
+      if (token < likeStatusToken - 3 || !r || !r.liked) return;
+      items.forEach(function(item){
+        likedSongMap[item.key] = !!(r.liked[item.id] || r.liked[String(item.id)]);
+      });
+    }).catch(function(err){ console.warn(provider + ' like check failed:', err); });
+  })).then(function(){
+    if (token < likeStatusToken - 3) return;
     safeRenderQueuePanel('like-status-sync', { scrollCurrent: miniQueueOpen });
     if ($results && $results.classList.contains('show')) refreshSearchResultActionStates();
     updateLikeButtons();
-  }).catch(function(err){ console.warn('like check failed:', err); });
+  });
 }
 function syncLikeStatusForSong(song) {
-  if (!isCloudSong(song)) { updateLikeButtons(song); return; }
+  if (!songLikeKey(song)) { updateLikeButtons(song); return; }
   syncLikeStatusForSongs([song]);
 }
 function isLikedPlaylistContext(id, title, meta) {
@@ -16544,7 +16822,8 @@ function isLikedPlaylistContext(id, title, meta) {
 }
 function markSongsLiked(songs, liked) {
   (songs || []).forEach(function(song){
-    if (isCloudSong(song)) likedSongMap[String(song.id)] = !!liked;
+    var key = songLikeKey(song);
+    if (key) likedSongMap[key] = !!liked;
   });
 }
 function refreshSearchResultActionStates() {
@@ -16558,6 +16837,52 @@ function refreshSearchResultActionStates() {
   });
 }
 async function toggleLikeSong(song) {
+  var provider = songLikeProvider(song);
+  if (!provider) {
+    showToast('本地文件暂不支持红心同步');
+    return;
+  }
+  if (!ensureLoggedInForProviderAction(provider)) return;
+  var id = songLikeRawId(song, provider);
+  var key = songLikeKey(song, provider);
+  if (!id || !key) { showToast('歌曲缺少可同步的 ID'); return; }
+  if (likeBusyMap[key]) return;
+  var next = !likedSongMap[key];
+  likeBusyMap[key] = true;
+  likedSongMap[key] = next;
+  updateLikeButtons(song);
+  safeRenderQueuePanel('like-toggle-optimistic', { scrollCurrent: miniQueueOpen });
+  refreshSearchResultActionStates();
+  try {
+    var payload = {
+      id: id,
+      like: next,
+      mid: song.mid || song.songmid || song.songMid || '',
+      songmid: song.songmid || song.mid || song.songMid || '',
+      qqId: song.qqId || '',
+      songType: songQQSongType(song),
+      sodaId: song.sodaId || '',
+      vid: song.vid || ''
+    };
+    var r = await apiJson(providerLikeToggleEndpoint(provider), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (r && r.error) throw new Error(collectResultMessage(r));
+    likedSongMap[key] = r && r.liked != null ? !!r.liked : next;
+    showToast(next ? '已加入红心喜欢' : '已取消红心');
+  } catch (err) {
+    likedSongMap[key] = !next;
+    showToast((err && err.message) ? ('红心同步失败: ' + err.message) : '红心操作失败');
+  } finally {
+    delete likeBusyMap[key];
+    updateLikeButtons(song);
+    safeRenderQueuePanel('like-toggle-final', { scrollCurrent: miniQueueOpen });
+    refreshSearchResultActionStates();
+  }
+}
+async function toggleLikeSongLegacy(song) {
   if (!isCloudSong(song)) {
     var provider = songProviderKey(song);
     showToast(provider === 'qq' ? 'QQ 音乐红心同步待登录接口接入' : (provider === 'soda' ? '汽水音乐红心同步接口暂未接入' : '本地文件暂不支持红心同步'));
@@ -16592,6 +16917,18 @@ function toggleLikeSearchResult(i) { if (playlist[i]) toggleLikeSong(playlist[i]
 function toggleLikeQueueIndex(i) { if (playQueue[i]) toggleLikeSong(playQueue[i]); }
 function toggleLikeDetailSong(song) { toggleLikeSong(song); }
 function openCollectModal(song) {
+  var provider = songLikeProvider(song);
+  if (!provider) {
+    showToast('本地文件暂不支持收藏到线上歌单');
+    return;
+  }
+  if (!ensureLoggedInForProviderAction(provider)) return;
+  collectTargetSong = song;
+  renderCollectModal();
+  openGsapModal(document.getElementById('collect-modal'));
+  refreshUserPlaylists(true).then(function(){ renderCollectModal(); }).catch(function(){ renderCollectModal(); });
+}
+function openCollectModalLegacy(song) {
   if (!isCloudSong(song)) {
     var provider = songProviderKey(song);
     showToast(provider === 'qq' ? 'QQ 音乐收藏到歌单待登录接口接入' : (provider === 'soda' ? '汽水音乐收藏写入接口暂未接入' : '本地文件暂不支持收藏到网易云歌单'));
@@ -16614,7 +16951,142 @@ function closeCollectModal() {
     if (input) input.value = '';
   });
 }
+function collectTargetProvider() {
+  return songLikeProvider(collectTargetSong);
+}
+function collectTargetSongId(provider) {
+  return songLikeRawId(collectTargetSong, provider || collectTargetProvider());
+}
+function setCollectCreateVisible(provider) {
+  var box = document.querySelector('#collect-modal .collect-create');
+  if (!box) return;
+  var canCreate = provider === 'netease';
+  box.style.display = canCreate ? '' : 'none';
+  Array.prototype.forEach.call(box.querySelectorAll('input,button'), function(node){
+    node.disabled = !canCreate;
+  });
+}
+function collectPlaylistProvider(pl) {
+  return normalizeMusicProvider(pl && (pl.provider || pl.source));
+}
+function collectPlaylistName(pl) {
+  return String(pl && (pl.name || pl.title) || '').trim();
+}
+function isProviderFavoriteCollectPlaylist(pl, provider) {
+  provider = normalizeMusicProvider(provider || collectPlaylistProvider(pl));
+  if (provider === 'netease') return isLikedPlaylistContext(pl && pl.id, collectPlaylistName(pl), pl);
+  var name = collectPlaylistName(pl).toLowerCase();
+  return !!(pl && (pl.favorite || Number(pl.specialType || 0) === 5)) ||
+    /liked|favorite|heart|love/i.test(name) ||
+    /\u6211\u559c\u6b22|\u559c\u6b22\u7684\u97f3\u4e50|\u7ea2\u5fc3/.test(name);
+}
+function isProviderReadOnlyCollectPlaylist(pl, provider) {
+  provider = normalizeMusicProvider(provider || collectPlaylistProvider(pl));
+  if (!pl) return true;
+  if (isProviderFavoriteCollectPlaylist(pl, provider)) return false;
+  if (pl.writable === false || pl.canWrite === false || pl.readonly === true || pl.readOnly === true) return true;
+  var name = collectPlaylistName(pl).toLowerCase();
+  return /\u672c\u5730\u4e0a\u4f20|\u6296\u97f3\u6536\u85cf\u7684\u97f3\u4e50|local\s*upload|douyin|tiktok/.test(name);
+}
+function isCollectWritablePlaylist(pl, provider) {
+  if (!pl || !pl.id) return false;
+  if (collectPlaylistProvider(pl) !== provider) return false;
+  if (isProviderFavoriteCollectPlaylist(pl, provider)) return true;
+  if (isProviderReadOnlyCollectPlaylist(pl, provider)) return false;
+  return !pl.subscribed;
+}
+function collectTrackMatchesSong(track, songId, provider) {
+  if (!track || !songId) return false;
+  songId = String(songId);
+  if (provider === 'qq') {
+    return String(track.mid || track.songmid || track.songMid || track.id || '') === songId ||
+      String(track.qqId || track.songId || track.songid || '') === songId;
+  }
+  if (provider === 'soda') {
+    return String(track.sodaId || track.id || track.trackId || track.track_id || '') === songId;
+  }
+  return songLikeRawId(track, provider) === songId;
+}
+function collectPlaylistForPid(pid, provider) {
+  pid = String(pid || '');
+  provider = normalizeMusicProvider(provider || collectTargetProvider());
+  return (userPlaylists || []).find(function(pl){
+    return collectPlaylistProvider(pl) === provider && String(pl.id || '') === pid;
+  }) || null;
+}
+function isCollectLikedPlaylist(pid, provider) {
+  provider = normalizeMusicProvider(provider || collectTargetProvider());
+  var pl = collectPlaylistForPid(pid, provider);
+  return isProviderFavoriteCollectPlaylist(pl || { id: pid }, provider);
+}
+function collectPlaylistWriteId(pid, provider) {
+  var pl = collectPlaylistForPid(pid, provider);
+  if (!pl) return '';
+  return String(pl.writeId || pl.dirid || pl.tid || pl.id || '');
+}
+function bumpCollectPlaylistCount(pid, provider) {
+  pid = String(pid || '');
+  provider = normalizeMusicProvider(provider || collectTargetProvider());
+  if (!pid || !provider) return;
+  var changed = false;
+  (userPlaylists || []).forEach(function(pl){
+    if (collectPlaylistProvider(pl) !== provider || String(pl.id || '') !== pid) return;
+    var count = Number(pl.trackCount || 0);
+    pl.trackCount = Math.max(1, count + 1);
+    changed = true;
+  });
+  if (!changed) return;
+  try { renderUserPlaylistsList(); } catch (e) {}
+  try { scheduleShelfRebuild('collect-count-bump', true); } catch (e) {}
+}
+async function refreshUserPlaylistsAfterCollect(pid, provider) {
+  bumpCollectPlaylistCount(pid, provider);
+  try {
+    await refreshUserPlaylists(true);
+  } catch (e) {
+    console.warn('collect playlist count refresh failed:', e);
+  }
+}
 function renderCollectModal() {
+  var current = document.getElementById('collect-current');
+  var list = document.getElementById('collect-list');
+  if (!current || !list) return;
+  var song = collectTargetSong || {};
+  var provider = collectTargetProvider();
+  var status = platformStatus(provider);
+  setCollectCreateVisible(provider);
+  var cover = songCoverSrc(song, 80);
+  current.innerHTML = (cover ? '<img src="' + cover + '" alt="">' : '<div class="cover-placeholder"></div>') +
+    '<div style="min-width:0"><div class="collect-title">' + escHtml(song.name || '当前歌曲') + '</div><div class="collect-sub">' + escHtml(song.artist || '') + '</div></div>';
+  if (!provider) {
+    list.innerHTML = '<div class="collect-empty">这首歌暂不支持收藏到线上歌单</div>';
+    return;
+  }
+  if (!status || !status.loggedIn) {
+    list.innerHTML = '<div class="collect-empty">登录 ' + escHtml(accountScopeLabel(provider)) + ' 后显示你的歌单</div>';
+    return;
+  }
+  if (!userPlaylists.length) {
+    list.innerHTML = miniQueueSkeleton();
+    return;
+  }
+  var mine = userPlaylists.filter(function(pl){ return isCollectWritablePlaylist(pl, provider); });
+  if (!mine.length) {
+    list.innerHTML = provider === 'netease'
+      ? '<div class="collect-empty">还没有可写入的歌单，可以先新建一个</div>'
+      : '<div class="collect-empty">还没有可写入的歌单，请先在官方客户端创建歌单</div>';
+    return;
+  }
+  list.innerHTML = mine.map(function(pl){
+    var thumb = pl.cover ? coverUrlWithSize(pl.cover, 80) : '';
+    return '<div class="collect-item" data-collect-provider="' + escHtml(provider) + '" data-collect-pid="' + escHtml(String(pl.id || '')) + '" onclick="addCollectTargetToPlaylist(this.getAttribute(\'data-collect-pid\'))">' +
+      (thumb ? '<img src="' + thumb + '" alt="">' : '<div class="cover-placeholder"></div>') +
+      '<div style="min-width:0"><div class="collect-title">' + escHtml(pl.name || '') + '</div><div class="collect-sub">' + (pl.trackCount || 0) + ' 首</div></div>' +
+    '</div>';
+  }).join('');
+  if (window.gsap) animateListItems(list, '.collect-item', { x: 0, y: 6, stagger: 0.012, duration: 0.18, limit: 18 });
+}
+function renderCollectModalLegacy() {
   var current = document.getElementById('collect-current');
   var list = document.getElementById('collect-list');
   if (!current || !list) return;
@@ -16652,6 +17124,30 @@ function setCollectBusyPid(pid, busy) {
   });
 }
 async function createPlaylistFromCollect() {
+  var provider = collectTargetProvider() || 'netease';
+  if (provider !== 'netease') {
+    showToast('QQ/汽水歌单请先在官方客户端新建');
+    return;
+  }
+  if (!ensureLoggedInForProviderAction(provider)) return;
+  var input = document.getElementById('collect-new-name');
+  var name = input ? input.value.trim() : '';
+  if (!name) { showToast('先输入歌单名称'); return; }
+  try {
+    var r = await apiJson('/api/playlist/create?name=' + encodeURIComponent(name));
+    if (r && r.error) throw new Error(r.error);
+    if (input) input.value = '';
+    showToast('歌单已创建');
+    await refreshUserPlaylists(true);
+    renderCollectModal();
+    var created = r && r.playlist;
+    var pid = created && created.id;
+    if (pid && collectTargetSong) addCollectTargetToPlaylist(pid);
+  } catch (err) {
+    showToast('创建歌单失败');
+  }
+}
+async function createPlaylistFromCollectLegacy() {
   if (!ensureLoggedInForAction()) return;
   var input = document.getElementById('collect-new-name');
   var name = input ? input.value.trim() : '';
@@ -16671,13 +17167,47 @@ async function createPlaylistFromCollect() {
   }
 }
 function collectResultMessage(r) {
+  var verifyProviderMsg = r && (r.error || r.message || r.msg || '');
+  if (/^(QQ|SODA)_(LIKE|PLAYLIST)_VERIFY_FAILED$/.test(String(verifyProviderMsg))) return '平台接口返回了成功，但歌单里没有确认到这首歌';
+  var readonlyProviderMsg = r && (r.error || r.message || r.msg || '');
+  if (readonlyProviderMsg === 'QQ_PLAYLIST_READONLY' || readonlyProviderMsg === 'SODA_PLAYLIST_READONLY') return '这个歌单是平台只读列表，不能从这里写入';
+  var providerMsg = r && (r.error || r.message || r.msg || '');
+  if (providerMsg === 'QQ_LOGIN_REQUIRED') return '登录 QQ 音乐后可同步';
+  if (providerMsg === 'SODA_LOGIN_REQUIRED') return '登录汽水音乐后可同步';
+  if (providerMsg === 'QQ_LIKE_WRITE_FAILED') return 'QQ 音乐红心接口没有完成写入，请稍后重试';
+  if (providerMsg === 'QQ_MISSING_NUMERIC_SONG_ID') return '这首 QQ 音乐缺少平台数字 ID，请从 QQ 搜索结果重新打开后再试';
+  if (providerMsg === 'QQ_PLAYLIST_WRITE_FAILED') return 'QQ 音乐没有开放这个歌单写入入口，请换一个自建歌单';
+  if (providerMsg === 'SODA_WRITE_FAILED') return '汽水音乐暂时没有确认到收藏结果，请稍后刷新歌单或重试';
+  if (providerMsg === 'SODA_PLAYLIST_WRITE_UNSUPPORTED') return '汽水音乐官方暂不支持从这里写入普通歌单，可以先点红心收藏';
+  if (providerMsg === 'SODA_LIKE_WRITE_FAILED') return '汽水音乐暂时没有确认到红心结果，请稍后刷新歌单或重试';
+  if (/^HTTP 404\b/i.test(String(providerMsg))) return '平台接口没有开放这个歌单写入入口';
   if (!r) return '收藏失败';
   var msg = r.error || r.message || r.msg || '';
   if (msg === 'LOGIN_REQUIRED') return '登录后可同步到网易云';
   if (/exist|重复|已存在|already/i.test(String(msg))) return '歌曲已在歌单中';
+  if (/无权限|权限|permission|privilege|no\s*right|not\s*allowed/i.test(String(msg))) return '这个歌单不允许直接写入，请换一个普通自建歌单';
   return msg ? ('收藏失败: ' + msg) : '收藏失败';
 }
-async function verifySongInPlaylist(pid, songId) {
+async function verifySongInPlaylist(pid, songId, provider) {
+  provider = normalizeMusicProvider(provider || collectTargetProvider());
+  songId = String(songId || '');
+  if (!pid || !songId) return false;
+  var waits = [260, 520, 900, 1500, 2400];
+  for (var attempt = 0; attempt < waits.length; attempt++) {
+    if (attempt) await new Promise(function(resolve){ setTimeout(resolve, waits[attempt]); });
+    try {
+      var detail = await apiJson(providerPlaylistTracksEndpoint(provider) + '?id=' + encodeURIComponent(pid));
+      var tracks = (detail && detail.tracks) || [];
+      for (var i = 0; i < tracks.length; i++) {
+        if (collectTrackMatchesSong(tracks[i], songId, provider)) return true;
+      }
+    } catch (e) {
+      console.warn('collect verify failed:', e);
+    }
+  }
+  return false;
+}
+async function verifySongInPlaylistLegacy(pid, songId) {
   songId = String(songId || '');
   if (!pid || !songId) return false;
   for (var attempt = 0; attempt < 3; attempt++) {
@@ -16697,6 +17227,97 @@ async function verifySongInPlaylist(pid, songId) {
   return false;
 }
 async function addCollectTargetToPlaylist(pid) {
+  var provider = collectTargetProvider();
+  if (collectBusy || !collectTargetSong || !pid || !provider) return;
+  if (!ensureLoggedInForProviderAction(provider)) return;
+  var songId = collectTargetSongId(provider);
+  var writeId = collectPlaylistWriteId(pid, provider);
+  if (!songId) { showToast('歌曲缺少可收藏的 ID'); return; }
+  collectBusy = true;
+  setCollectBusyPid(pid, true);
+  updateLikeButtons();
+  showToast('正在收藏到歌单...');
+  try {
+    if (isCollectLikedPlaylist(pid, provider)) {
+      showToast('正在加入红心喜欢...');
+      var likeResult = await apiJson(providerLikeToggleEndpoint(provider), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: songId,
+          like: true,
+          mid: collectTargetSong.mid || collectTargetSong.songmid || collectTargetSong.songMid || '',
+          songmid: collectTargetSong.songmid || collectTargetSong.mid || collectTargetSong.songMid || '',
+          qqId: collectTargetSong.qqId || '',
+          songType: songQQSongType(collectTargetSong),
+          sodaId: collectTargetSong.sodaId || '',
+          vid: collectTargetSong.vid || ''
+        })
+      });
+      var likeCode = Number(likeResult && likeResult.code || 200);
+      if (likeResult && (likeResult.error || (likeResult.code && likeCode !== 200))) {
+        if (!(provider === 'soda' && await verifySongInPlaylist(pid, songId, provider))) {
+          throw new Error(collectResultMessage(likeResult));
+        }
+      }
+      var likeKey = songLikeKey(collectTargetSong, provider);
+      if (likeKey) likedSongMap[likeKey] = true;
+      showToast('已加入红心喜欢');
+      closeCollectModal();
+      refreshUserPlaylistsAfterCollect(pid, provider);
+      safeRenderQueuePanel('collect-liked-playlist', { scrollCurrent: miniQueueOpen });
+      refreshSearchResultActionStates();
+      return;
+    }
+    var r = await apiJson(providerPlaylistAddEndpoint(provider), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pid: pid,
+        writeId: writeId,
+        id: songId,
+        mid: collectTargetSong.mid || collectTargetSong.songmid || collectTargetSong.songMid || '',
+        songmid: collectTargetSong.songmid || collectTargetSong.mid || collectTargetSong.songMid || '',
+        qqId: collectTargetSong.qqId || '',
+        songType: songQQSongType(collectTargetSong),
+        sodaId: collectTargetSong.sodaId || '',
+        vid: collectTargetSong.vid || ''
+      })
+    });
+    if (!(r && r.success)) {
+      if (provider === 'soda' && await verifySongInPlaylist(pid, songId, provider)) {
+        r = { success: true, verified: true, recoveredByClientVerify: true };
+      } else {
+        throw new Error(collectResultMessage(r));
+      }
+    }
+    if (r && (r.likedFallback || r.favoriteFallback)) {
+      var fallbackLikeKey = songLikeKey(collectTargetSong, provider);
+      if (fallbackLikeKey) likedSongMap[fallbackLikeKey] = true;
+      showToast('已加入红心喜欢');
+      closeCollectModal();
+      refreshUserPlaylistsAfterCollect(pid, provider);
+      safeRenderQueuePanel('collect-liked-fallback', { scrollCurrent: miniQueueOpen });
+      refreshSearchResultActionStates();
+      return;
+    }
+    if (provider === 'netease') showToast('正在确认歌单写入...');
+    var verified = provider === 'netease'
+      ? (r && r.verified === true ? true : await verifySongInPlaylist(pid, songId, provider))
+      : true;
+    if (!verified) throw new Error('没有在歌单里确认到这首歌，请稍后重试');
+    showToast('已收藏到歌单');
+    closeCollectModal();
+    refreshUserPlaylistsAfterCollect(pid, provider);
+  } catch (err) {
+    showToast(err && err.message ? err.message : '收藏失败');
+  } finally {
+    collectBusy = false;
+    setCollectBusyPid(pid, false);
+    updateLikeButtons();
+  }
+}
+async function addCollectTargetToPlaylistLegacy(pid) {
   if (collectBusy || !collectTargetSong || !pid) return;
   collectBusy = true;
   setCollectBusyPid(pid, true);
@@ -17442,6 +18063,7 @@ function initAudio() {
   analyser.connect(gainNode);
   gainNode.connect(audioCtx.destination);
   applyVolumeToAudio();
+  applyPlaybackRateToAudio();
   frequencyData.fill(0);
   beatFrequencyData.fill(0);
   beatTimeDomainData.fill(128);
@@ -17645,6 +18267,91 @@ function fadeOutAndPauseAudio() {
   });
 }
 
+function normalizePlaybackRate(value) {
+  var rate = Number(value);
+  if (!isFinite(rate) || rate <= 0) rate = 1;
+  return Math.round(clampRange(rate, 0.5, 2) * 100) / 100;
+}
+function readSavedPlaybackRate() {
+  try { return normalizePlaybackRate(localStorage.getItem(PLAYBACK_RATE_STORE_KEY) || 1); }
+  catch (e) { return 1; }
+}
+function savePlaybackRatePreference() {
+  try { localStorage.setItem(PLAYBACK_RATE_STORE_KEY, String(playbackRate)); } catch (e) {}
+}
+function playbackRateLabel(rate) {
+  rate = normalizePlaybackRate(rate);
+  return (Math.round(rate) === rate ? String(rate) : String(rate.toFixed(2)).replace(/0+$/, '').replace(/\.$/, '')) + 'x';
+}
+function applyPlaybackRateToAudio() {
+  if (!audio) return;
+  try {
+    audio.defaultPlaybackRate = playbackRate;
+    audio.playbackRate = playbackRate;
+    if ('preservesPitch' in audio) audio.preservesPitch = true;
+    if ('mozPreservesPitch' in audio) audio.mozPreservesPitch = true;
+    if ('webkitPreservesPitch' in audio) audio.webkitPreservesPitch = true;
+  } catch (e) {
+    console.warn('[PlaybackRate]', e);
+  }
+}
+function updatePlaybackRateUi() {
+  var label = document.getElementById('speed-btn-label');
+  var btn = document.getElementById('speed-btn');
+  if (label) label.textContent = playbackRateLabel(playbackRate);
+  if (btn) {
+    btn.title = '播放倍速: ' + playbackRateLabel(playbackRate);
+    btn.setAttribute('aria-label', btn.title);
+    btn.classList.toggle('active', Math.abs(playbackRate - 1) > 0.001);
+  }
+  document.querySelectorAll('.speed-option').forEach(function(option){
+    var rate = normalizePlaybackRate(option.dataset.rate);
+    option.classList.toggle('active', Math.abs(rate - playbackRate) < 0.001);
+  });
+}
+function setPlaybackRate(value, silent) {
+  playbackRate = normalizePlaybackRate(value);
+  savePlaybackRatePreference();
+  applyPlaybackRateToAudio();
+  updatePlaybackRateUi();
+  var wrap = document.getElementById('speed-control');
+  if (wrap) wrap.classList.remove('open');
+  if (!silent) showToast('播放倍速 ' + playbackRateLabel(playbackRate));
+}
+function toggleSpeedPanel(e) {
+  if (e) e.stopPropagation();
+  var wrap = document.getElementById('speed-control');
+  if (playbackRateCloseTimer) { clearTimeout(playbackRateCloseTimer); playbackRateCloseTimer = null; }
+  if (wrap) wrap.classList.toggle('open');
+}
+function bindPlaybackRateControl() {
+  var wrap = document.getElementById('speed-control');
+  function keepSpeedPanelOpen() {
+    if (playbackRateCloseTimer) { clearTimeout(playbackRateCloseTimer); playbackRateCloseTimer = null; }
+    if (wrap) wrap.classList.add('open');
+  }
+  function closeSpeedPanelSoon() {
+    if (playbackRateCloseTimer) clearTimeout(playbackRateCloseTimer);
+    playbackRateCloseTimer = setTimeout(function(){
+      playbackRateCloseTimer = null;
+      if (wrap) wrap.classList.remove('open');
+    }, 360);
+  }
+  if (wrap) {
+    wrap.addEventListener('mouseenter', keepSpeedPanelOpen);
+    wrap.addEventListener('mouseleave', closeSpeedPanelSoon);
+  }
+  document.addEventListener('click', function(e){
+    if (!wrap) return;
+    if (!wrap.contains(e.target)) {
+      if (playbackRateCloseTimer) { clearTimeout(playbackRateCloseTimer); playbackRateCloseTimer = null; }
+      wrap.classList.remove('open');
+    }
+  });
+  updatePlaybackRateUi();
+  applyPlaybackRateToAudio();
+}
+
 function applyVolumeToAudio() {
   if (audio) {
     audio.muted = false;
@@ -17752,6 +18459,137 @@ function queueItemKey(song) {
   if (song.id != null && song.id !== '') return 'song:' + song.id;
   return String(song.name || '') + '|' + String(song.artist || '');
 }
+
+function shuffleKeyForIndex(idx) {
+  if (!playQueue || idx < 0 || idx >= playQueue.length || !playQueue[idx]) return '';
+  return queueItemKey(playQueue[idx]) || ('queue-index:' + idx);
+}
+
+function shuffleQueueCurrentSignature() {
+  if (!playQueue || !playQueue.length) return '';
+  var parts = [];
+  for (var i = 0; i < playQueue.length; i++) parts.push(shuffleKeyForIndex(i));
+  return parts.join('\n');
+}
+
+function reconcileShuffleHistory() {
+  var signature = shuffleQueueCurrentSignature();
+  if (signature === shuffleQueueSignature) return;
+  shuffleQueueSignature = signature;
+  var present = Object.create(null);
+  for (var i = 0; i < playQueue.length; i++) {
+    var key = shuffleKeyForIndex(i);
+    if (key) present[key] = true;
+  }
+  var nextPlayedKeys = Object.create(null);
+  var nextPlayedOrder = [];
+  for (var j = 0; j < shufflePlayedOrder.length; j++) {
+    var playedKey = shufflePlayedOrder[j];
+    if (present[playedKey] && !nextPlayedKeys[playedKey]) {
+      nextPlayedKeys[playedKey] = true;
+      nextPlayedOrder.push(playedKey);
+    }
+  }
+  var nextBackStack = [];
+  for (var k = 0; k < shuffleBackStack.length; k++) {
+    var backKey = shuffleBackStack[k];
+    if (present[backKey]) nextBackStack.push(backKey);
+  }
+  shufflePlayedKeys = nextPlayedKeys;
+  shufflePlayedOrder = nextPlayedOrder;
+  shuffleBackStack = nextBackStack;
+}
+
+function resetShuffleHistory() {
+  shufflePlayedKeys = Object.create(null);
+  shufflePlayedOrder = [];
+  shuffleBackStack = [];
+  shuffleQueueSignature = shuffleQueueCurrentSignature();
+}
+
+function markShufflePlayed(idx) {
+  reconcileShuffleHistory();
+  var key = shuffleKeyForIndex(idx);
+  if (!key) return '';
+  shufflePlayedKeys[key] = true;
+  var existing = shufflePlayedOrder.indexOf(key);
+  if (existing >= 0) shufflePlayedOrder.splice(existing, 1);
+  shufflePlayedOrder.push(key);
+  if (shufflePlayedOrder.length > Math.max(64, playQueue.length * 2)) {
+    shufflePlayedOrder.splice(0, shufflePlayedOrder.length - Math.max(64, playQueue.length * 2));
+  }
+  return key;
+}
+
+function queueIndexRecentlyFailed(idx, now) {
+  if (!playQueue[idx]) return true;
+  var failedAt = Number(playQueue[idx]._lastPlaybackFailAt) || 0;
+  return !!(failedAt && (now || Date.now()) - failedAt <= 18000);
+}
+
+function findQueueIndexByShuffleKey(key) {
+  if (!key) return -1;
+  for (var i = 0; i < playQueue.length; i++) {
+    if (shuffleKeyForIndex(i) === key) return i;
+  }
+  return -1;
+}
+
+function randomQueueCandidate(candidates) {
+  if (!candidates || !candidates.length) return -1;
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+function pushShuffleBackKey(key) {
+  if (!key) return;
+  if (shuffleBackStack.length && shuffleBackStack[shuffleBackStack.length - 1] === key) return;
+  shuffleBackStack.push(key);
+  if (shuffleBackStack.length > Math.max(32, playQueue.length * 2)) {
+    shuffleBackStack.splice(0, shuffleBackStack.length - Math.max(32, playQueue.length * 2));
+  }
+}
+
+function nextShuffleQueueIndex(fromIdx, opts) {
+  opts = opts || {};
+  reconcileShuffleHistory();
+  if (!playQueue.length) return -1;
+  var currentKey = shuffleKeyForIndex(fromIdx);
+  if (opts.markCurrent !== false && currentKey) markShufflePlayed(fromIdx);
+  var now = Date.now();
+  var candidates = [];
+  for (var i = 0; i < playQueue.length; i++) {
+    if (playQueue.length > 1 && i === fromIdx) continue;
+    if (opts.includeFailed !== true && queueIndexRecentlyFailed(i, now)) continue;
+    var key = shuffleKeyForIndex(i);
+    if (key && !shufflePlayedKeys[key]) candidates.push(i);
+  }
+  if (!candidates.length) {
+    resetShuffleHistory();
+    if (currentKey) markShufflePlayed(fromIdx);
+    for (var j = 0; j < playQueue.length; j++) {
+      if (playQueue.length > 1 && j === fromIdx) continue;
+      if (opts.includeFailed !== true && queueIndexRecentlyFailed(j, now)) continue;
+      var nextKey = shuffleKeyForIndex(j);
+      if (nextKey && !shufflePlayedKeys[nextKey]) candidates.push(j);
+    }
+  }
+  var nextIdx = randomQueueCandidate(candidates);
+  if (nextIdx < 0 && fromIdx >= 0 && fromIdx < playQueue.length && (opts.includeFailed === true || !queueIndexRecentlyFailed(fromIdx, now))) nextIdx = fromIdx;
+  if (nextIdx >= 0 && nextIdx !== fromIdx && currentKey) pushShuffleBackKey(currentKey);
+  return nextIdx;
+}
+
+function previousShuffleQueueIndex(fromIdx) {
+  reconcileShuffleHistory();
+  while (shuffleBackStack.length) {
+    var key = shuffleBackStack.pop();
+    var idx = findQueueIndexByShuffleKey(key);
+    if (idx >= 0 && idx !== fromIdx) return idx;
+  }
+  if (!playQueue.length) return -1;
+  return (fromIdx - 1 + playQueue.length) % playQueue.length;
+}
+
 function queueSong(song, opts) {
   opts = opts || {};
   if (!song) return -1;
@@ -18030,7 +18868,9 @@ function skipFailedQueueItem(idx, token, message) {
     showSourceFallbackNotice('没有可跳过的下一首', message || '当前歌曲不可播放，队列里没有其他歌曲。');
     return;
   }
-  var nextIdx = nextUnblockedQueueIndex(idx);
+  var nextIdx = playMode === 'shuffle'
+    ? nextShuffleQueueIndex(idx, { includeFailed: false })
+    : nextUnblockedQueueIndex(idx);
   if (nextIdx < 0) {
     showSourceFallbackNotice('队列暂时没有可播歌曲', '已尝试绕开受限歌曲，当前队列没有新的可播放项。');
     return;
@@ -18121,6 +18961,7 @@ function playbackQueueKeyForCurrentUi() {
 
 function bindAudioToPlaybackSong(song) {
   playbackAudioQueueKey = queueItemKey(song) || '';
+  applyPlaybackRateToAudio();
 }
 
 function clearAudioSourceForTrackSwitch() {
@@ -18203,6 +19044,78 @@ function playbackFailureToastText(err) {
   if (isPlaybackRecursionError(err)) return '播放准备异常，已保持播放器可操作';
   return '播放失败: ' + (err && err.message ? err.message : err);
 }
+
+function playbackStartErrorName(err) {
+  return String((err && err.name) || '').toLowerCase();
+}
+
+function playbackStartErrorMessage(err) {
+  if (err && err.message) return String(err.message);
+  if (err && err.code) return 'media error ' + err.code;
+  if (audio && audio.error && audio.error.code) return 'media error ' + audio.error.code;
+  return 'audio play failed';
+}
+
+function isAutoplayPolicyError(err) {
+  var name = playbackStartErrorName(err);
+  var msg = playbackStartErrorMessage(err).toLowerCase();
+  return name === 'notallowederror' || /notallowed|permission|user gesture|user didn't interact|interact with the document|autoplay/i.test(msg);
+}
+
+function waitForPlaybackRetry(ms, token) {
+  return new Promise(function(resolve){
+    setTimeout(function(){ resolve(token === trackSwitchToken); }, ms);
+  });
+}
+
+async function retryAudioPlayStart(token, opts) {
+  opts = opts || {};
+  var attempts = Math.max(1, Number(opts.attempts) || 2);
+  for (var i = 0; i < attempts; i++) {
+    if (token !== trackSwitchToken) return false;
+    if (!(await waitForPlaybackRetry(i === 0 ? 180 : 420, token))) return false;
+    if (!audio || !audio.src || !audioMatchesCurrentUiSong()) return false;
+    var started = await attemptAudioPlay({ silent: true, fade: i > 0 });
+    if (started) return true;
+    if (isAutoplayPolicyError(lastAudioPlayError)) return false;
+  }
+  return false;
+}
+
+async function recoverPlaybackStartFailure(song, data, idx, token, opts, requestedQuality, isQQPlayback) {
+  opts = opts || {};
+  var startErr = lastAudioPlayError || (audio && audio.error) || null;
+  if (!isAutoplayPolicyError(startErr)) {
+    if (await retryAudioPlayStart(token, { attempts: 2 })) return 'started';
+    startErr = lastAudioPlayError || (audio && audio.error) || startErr;
+  }
+  if (token !== trackSwitchToken) return 'handled';
+  if (isQQPlayback && await retryQQPlaybackWithCompatibleQuality(song, idx, token, opts, data, requestedQuality)) return 'handled';
+  if (isAutoplayPolicyError(startErr)) {
+    markPlaybackWaitingForUser('autoplay-blocked');
+    forcePlaybackControlsInteractive();
+    if (opts.manual) showToast('播放被系统拦截，请再点击一次播放按钮');
+    else showSourceFallbackNotice('歌曲已载入', '点击播放器中间的播放按钮继续播放。');
+    return 'handled';
+  }
+  var fallbackData = Object.assign({}, data || {}, {
+    reason: 'play_start_failed',
+    message: playbackStartErrorMessage(startErr)
+  });
+  if (await trySameProviderPlaybackFallback(song, fallbackData, idx, token, opts, requestedQuality)) return 'handled';
+  if (await tryAutoPlaybackFallback(song, fallbackData, idx, token, opts)) return 'handled';
+  if (playQueue.length > 1) {
+    skipFailedQueueItem(idx, token, '当前歌曲启动失败，正在自动尝试下一首。');
+    return 'handled';
+  }
+  markQueueItemPlaybackFailed(idx);
+  playbackAudioQueueKey = '';
+  hideLoading();
+  forcePlaybackControlsInteractive();
+  showSourceFallbackNotice('当前歌曲无法启动', '播放器已恢复可操作，请换一首或稍后再试。');
+  return 'handled';
+}
+
 function scheduleAudioResumePosition(media, seconds, token) {
   seconds = Math.max(0, Number(seconds) || 0);
   if (!media || seconds < 0.35) return;
@@ -18584,17 +19497,11 @@ async function playQueueAt(idx, opts) {
       safePlaybackStep('visual-prep-hide-chip', hideBeatChip);
     }
     markPlayPhase('audio-start');
-    var playbackStarted = await playAudio({ silent: isQQPlayback });
+    var playbackStarted = await playAudio({ silent: true });
     if (!playbackStarted) {
-      if (isQQPlayback && await retryQQPlaybackWithCompatibleQuality(song, idx, token, opts, data, requestedQuality)) return;
-      markPlaybackWaitingForUser('autoplay-blocked');
-      forcePlaybackControlsInteractive();
-      if (opts.manual) {
-        showToast('播放启动失败，请重新选择歌曲');
-      } else {
-        showSourceFallbackNotice('歌曲已载入', '点击播放器中间的播放按钮继续播放。');
-      }
-      return;
+      var recovery = await recoverPlaybackStartFailure(song, data, idx, token, opts, requestedQuality, isQQPlayback);
+      if (recovery === 'started') playbackStarted = true;
+      else return;
     }
     forcePlaybackControlsInteractive();
     safePlaybackStep('last-playback-save-started', function(){ saveLastPlaybackState({ force: true }); });
@@ -18617,7 +19524,7 @@ async function playQueueAt(idx, opts) {
     console.error('Play failed:', { phase: playPhase, error: err }, err);
     hideLoading();
     forcePlaybackControlsInteractive();
-    if (!isPlaybackRecursionError(err) && token === trackSwitchToken && !opts.manual && playQueue.length > 1) {
+    if (!isPlaybackRecursionError(err) && token === trackSwitchToken && playQueue.length > 1) {
       skipFailedQueueItem(idx, token, '当前歌曲加载失败，正在尝试队列里的下一首。');
       return;
     }
@@ -18627,7 +19534,7 @@ async function playQueueAt(idx, opts) {
     console.error('Play setup failed:', { phase: playPhase, error: setupErr }, setupErr);
     hideLoading();
     forcePlaybackControlsInteractive();
-    if (!isPlaybackRecursionError(setupErr) && typeof token !== 'undefined' && token === trackSwitchToken && !opts.manual && playQueue.length > 1) {
+    if (!isPlaybackRecursionError(setupErr) && typeof token !== 'undefined' && token === trackSwitchToken && playQueue.length > 1) {
       skipFailedQueueItem(idx, token, '当前歌曲切换失败，正在尝试队列里的下一首。');
       return;
     }
@@ -18636,8 +19543,12 @@ async function playQueueAt(idx, opts) {
 }
 async function attemptAudioPlay(opts) {
   opts = opts || {};
+  lastAudioPlayError = null;
   try {
-      if (!audio || !audio.src || !audioMatchesCurrentUiSong()) return false;
+      if (!audio || !audio.src || !audioMatchesCurrentUiSong()) {
+        lastAudioPlayError = new Error('audio source is not ready');
+        return false;
+      }
       if (!audioReady) initAudio();
       if (opts.fade !== false) preparePlaybackFadeIn();
       if (opts.manual) {
@@ -18652,16 +19563,26 @@ async function attemptAudioPlay(opts) {
       switchPlaybackVisualToEmily();
       playbackAwaitingUserGesture = false;
       playing = true; setPlayIcon(true);
+    if (playMode === 'shuffle') markShufflePlayed(currentIdx);
     if (opts.fade !== false) startPlaybackFadeIn();
     else restorePlaybackGain();
     forcePlaybackControlsInteractive();
     hideLoading();
     return true;
   } catch (err) {
+    lastAudioPlayError = err || new Error('audio play failed');
     console.warn('Audio play blocked:', err && (err.message || err));
     restorePlaybackGain();
-    markPlaybackWaitingForUser(opts.manual ? 'manual-play-failed' : 'autoplay-blocked');
-    if (!opts.silent) showToast(opts.manual ? '播放启动失败, 请重新选择歌曲' : '播放被系统拦截, 请点击播放按钮');
+    if (isAutoplayPolicyError(err)) {
+      markPlaybackWaitingForUser(opts.manual ? 'manual-play-blocked' : 'autoplay-blocked');
+      if (!opts.silent) showToast(opts.manual ? '播放被系统拦截，请再点击一次播放按钮' : '播放被系统拦截，请点击播放按钮');
+    } else {
+      playing = false;
+      setPlayIcon(false);
+      hideLoading();
+      forcePlaybackControlsInteractive();
+      updatePlaybackProgressUi();
+    }
     return false;
   }
 }
@@ -18685,7 +19606,22 @@ async function togglePlay() {
       return;
     }
     if (playbackAwaitingUserGesture || audio.paused || audio.ended) {
-      await attemptAudioPlay({ manual: true });
+      var manualStarted = await attemptAudioPlay({ manual: true, silent: true });
+      if (!manualStarted && playQueue.length && currentIdx >= 0 && playQueue[currentIdx]) {
+        var manualSong = playQueue[currentIdx];
+        var manualProvider = songProviderKey(manualSong);
+        await recoverPlaybackStartFailure(
+          manualSong,
+          { provider: manualProvider },
+          currentIdx,
+          trackSwitchToken,
+          { manual: true, skipSingleQueueExpand: true },
+          defaultPlaybackQualityForProvider(manualProvider),
+          manualProvider === 'qq'
+        );
+      } else if (!manualStarted) {
+        showToast('播放控制失败');
+      }
     } else {
       await fadeOutAndPauseAudio();
       playing = false;
@@ -18716,15 +19652,18 @@ function nextTrack() {
   if (!playQueue.length) return;
   playToggleBusy = false;
   forcePlaybackControlsInteractive();
-  if (playMode === 'shuffle') currentIdx = Math.floor(Math.random() * playQueue.length);
+  if (playMode === 'shuffle') currentIdx = nextShuffleQueueIndex(currentIdx);
   else currentIdx = (currentIdx + 1) % playQueue.length;
+  if (currentIdx < 0) return;
   Promise.resolve(playQueueAt(currentIdx)).finally(forcePlaybackControlsInteractive);
 }
 function prevTrack() {
   if (!playQueue.length) return;
   playToggleBusy = false;
   forcePlaybackControlsInteractive();
-  currentIdx = (currentIdx - 1 + playQueue.length) % playQueue.length;
+  if (playMode === 'shuffle') currentIdx = previousShuffleQueueIndex(currentIdx);
+  else currentIdx = (currentIdx - 1 + playQueue.length) % playQueue.length;
+  if (currentIdx < 0) return;
   Promise.resolve(playQueueAt(currentIdx)).finally(forcePlaybackControlsInteractive);
 }
 function shuffleQueue() {
@@ -18732,12 +19671,16 @@ function shuffleQueue() {
     var j = Math.floor(Math.random() * (i + 1));
     var tmp = playQueue[i]; playQueue[i] = playQueue[j]; playQueue[j] = tmp;
   }
-  currentIdx = 0; safeRenderQueuePanel('shuffle-queue');
+  resetShuffleHistory();
+  currentIdx = 0;
+  if (currentIdx >= 0) markShufflePlayed(currentIdx);
+  safeRenderQueuePanel('shuffle-queue');
   showToast('队列已随机');
   safeShelfRebuild('shuffle-queue');
 }
 function clearQueue() {
   playQueue = []; currentIdx = -1;
+  resetShuffleHistory();
   clearLastPlaybackState();
   safeRenderQueuePanel('clear-queue');
   safeShelfRebuild('clear-queue');
@@ -18749,6 +19692,7 @@ function removeFromQueue(idx) {
   if (idx < 0 || idx >= playQueue.length) return;
   playQueue.splice(idx, 1);
   if (currentIdx >= playQueue.length) currentIdx = playQueue.length - 1;
+  reconcileShuffleHistory();
   safeRenderQueuePanel('remove-queue-item');
   safeShelfRebuild('remove-queue-item');
   updateCustomCoverButton();
@@ -18806,6 +19750,10 @@ function cyclePlayMode() {
   var modes = ['loop', 'shuffle', 'single'];
   var idx = modes.indexOf(playMode);
   playMode = modes[(idx + 1) % modes.length];
+  if (playMode === 'shuffle') {
+    resetShuffleHistory();
+    if (currentIdx >= 0) markShufflePlayed(currentIdx);
+  }
   updatePlayModeButton(true);
   showToast('播放模式: ' + playModeLabel(playMode));
 }
@@ -19366,6 +20314,16 @@ function openPlaylistPanelTab(tab, preserve) {
   switchPlaylistTab(tab);
   setPeek(panel, true, 'pl');
 }
+function miniQueueVisibleRange(total) {
+  total = Math.max(0, Number(total) || 0);
+  var limit = Math.min(total, MINI_QUEUE_RENDER_LIMIT);
+  var start = 0;
+  if (total > limit && currentIdx >= 0) {
+    var beforeCurrent = Math.min(42, Math.floor(limit / 3));
+    start = Math.max(0, Math.min(total - limit, currentIdx - beforeCurrent));
+  }
+  return { start: start, end: start + limit, total: total, limited: total > limit };
+}
 function renderMiniQueuePanel(opts) {
   opts = opts || {};
   var $list = document.getElementById('mini-queue-list');
@@ -19378,16 +20336,22 @@ function renderMiniQueuePanel(opts) {
     $list.innerHTML = '<div class="mini-queue-empty">队列为空，先搜索或打开歌单</div>';
     return;
   }
-  $list.innerHTML = playQueue.map(function(song, i){
+  var range = miniQueueVisibleRange(total);
+  var rows = [];
+  if (range.start > 0) rows.push('<div class="mini-queue-window-note">已省略前 ' + range.start + ' 首</div>');
+  for (var i = range.start; i < range.end; i++) {
+    var song = playQueue[i];
     var thumb = songCoverSrc(song, 60);
     var imgTag = thumb ? '<img src="' + thumb + '" alt="" loading="lazy" decoding="async" onerror="this.style.opacity=0.2">' : '<div class="mini-queue-cover"></div>';
-    return '<div class="mini-queue-item' + (i === currentIdx ? ' now' : '') + '" onclick="playQueueAt(' + i + ')">' +
+    rows.push('<div class="mini-queue-item' + (i === currentIdx ? ' now' : '') + '" onclick="playQueueAt(' + i + ')">' +
       imgTag +
       '<div class="mini-queue-info"><div class="mini-queue-name">' + escHtml(song.name) + '</div><div class="mini-queue-sub">' + escHtml(song.artist || '') + '</div></div>' +
       '<button class="mini-queue-remove mini-queue-next" onclick="event.stopPropagation();queueIndexNext(' + i + ')" title="下一首播放">下</button>' +
       '<button class="mini-queue-remove" onclick="event.stopPropagation();removeFromQueue(' + i + ')" title="移除">×</button>' +
-    '</div>';
-  }).join('');
+    '</div>');
+  }
+  if (range.end < total) rows.push('<div class="mini-queue-window-note">还有 ' + (total - range.end) + ' 首未显示</div>');
+  $list.innerHTML = rows.join('');
   if (opts.animate || opts.scrollCurrent) {
     requestAnimationFrame(function(){
       if (opts.animate) animateListItems($list, '.mini-queue-item', { x: 0, y: 6, stagger: 0.01, duration: 0.20, limit: 16 });
@@ -20033,7 +20997,7 @@ async function loadPlaylistIntoQueueById(id, autoplay, title) {
         await playQueueAt(0);
       } catch (playErr) {
         console.warn('[PlaylistAutoplay]', id, playErr);
-        showToast('歌单已载入，播放启动失败');
+        showToast('歌单已载入，播放器已恢复可操作');
       }
     }
     forcePlaybackControlsInteractive();
@@ -20083,8 +21047,15 @@ function updatePlaybackProgressUi() {
 function bindPlaybackProgressEvents(audioEl) {
   if (!audioEl || audioEl._mineradioProgressBound) return;
   audioEl._mineradioProgressBound = true;
-  ['loadedmetadata', 'durationchange', 'timeupdate', 'seeked', 'play', 'pause', 'emptied'].forEach(function(name){
+  ['loadedmetadata', 'durationchange', 'timeupdate', 'seeked', 'play', 'pause', 'emptied', 'ratechange'].forEach(function(name){
     audioEl.addEventListener(name, updatePlaybackProgressUi);
+  });
+  audioEl.addEventListener('ratechange', function(){
+    if (audioEl === audio && Math.abs(normalizePlaybackRate(audioEl.playbackRate) - playbackRate) > 0.001) {
+      playbackRate = normalizePlaybackRate(audioEl.playbackRate);
+      savePlaybackRatePreference();
+      updatePlaybackRateUi();
+    }
   });
   ['play', 'playing', 'pause', 'ended', 'emptied', 'abort', 'error'].forEach(function(name){
     audioEl.addEventListener(name, function(){ syncPlaybackStateFromAudioEvent(name); });
@@ -20389,7 +21360,7 @@ function normalizeFxArchiveSnapshot(raw) {
     shelfOpacity: archiveNumber(raw, 'shelfOpacity', fxDefaults.shelfOpacity, 0.25, 1),
     shelfBgOpacity: archiveNumber(raw, 'shelfBgOpacity', fxDefaults.shelfBgOpacity, 0.25, 0.98),
     shelfAccentColor: normalizeHexColor(raw.shelfAccentColor || fxDefaults.shelfAccentColor, fxDefaults.shelfAccentColor),
-    cam: archiveMode(raw, 'cam', /^(off|gesture)$/, fxDefaults.cam)
+    cam: fxDefaults.cam
   };
 }
 function readUserFxArchives() {
@@ -20462,7 +21433,7 @@ function applyFxArchiveSnapshot(snapshot) {
   if (!data) return false;
   var targetPreset = data.preset;
   Object.keys(data).forEach(function(key){
-    if (key === 'visualPresetSchema' || key === 'preset') return;
+    if (key === 'visualPresetSchema' || key === 'preset' || key === 'cam') return;
     fx[key] = data[key];
   });
   normalizeDevelopmentLockedFxState();
@@ -20478,7 +21449,7 @@ function applyFxArchiveSnapshot(snapshot) {
   setShelfMode(fx.shelf);
   if (shelfManager && shelfManager.rebuild) shelfManager.rebuild(true);
   if (shelfManager && shelfManager.refreshTheme) shelfManager.refreshTheme();
-  setCamMode(fx.cam);
+  syncCamModeControls();
   updateFxInputs();
   renderHomeDashboard();
   applySavedLyricPaletteState();
@@ -22535,6 +23506,11 @@ function bindFxPanel() {
   });
   document.querySelectorAll('#cam-seg button').forEach(function(b){
     b.addEventListener('click', function(){ setCamMode(b.dataset.cam); });
+    if (b.dataset.cam === 'gesture') {
+      b.addEventListener('mouseenter', function(){ prewarmGestureModel('gesture-hover'); });
+      b.addEventListener('focus', function(){ prewarmGestureModel('gesture-focus'); });
+      b.addEventListener('touchstart', function(){ prewarmGestureModel('gesture-touch'); }, { passive: true });
+    }
   });
   document.querySelectorAll('#desktop-lyrics-fps-seg [data-desktop-lyrics-fps]').forEach(function(btn){
     btn.addEventListener('click', function(){
@@ -22641,7 +23617,7 @@ function toggleFxPanel(force) {
   setPeek(el, true, 'fx');
 }
 function resetFx() {
-  var savedCam = fx.cam;
+  var savedCam = normalizeCamMode(fx.cam);
   var savedShelf = fx.shelf;
   var savedShelfCameraMode = normalizeShelfCameraMode(fx.shelfCameraMode || fxDefaults.shelfCameraMode);
   var savedShelfPresence = normalizeShelfPresence(fx.shelfPresence || fxDefaults.shelfPresence);
@@ -22831,10 +23807,19 @@ function toggleImmersiveMode() {
   setImmersiveMode(!immersiveMode);
 }
 
+function normalizeCamMode(m) {
+  if (m === 'head') return 'gesture';
+  return m === 'gesture' ? 'gesture' : fxDefaults.cam;
+}
+function syncCamModeControls() {
+  var mode = normalizeCamMode(fx && fx.cam);
+  if (fx) fx.cam = mode;
+  document.querySelectorAll('#cam-seg button').forEach(function(b){ b.classList.toggle('active', b.dataset.cam === mode); });
+}
 function setCamMode(m) {
-  if (m === 'head') m = 'gesture'; // v8: 头部追踪已下线, 兼容旧设置
+  m = normalizeCamMode(m);
   fx.cam = m;
-  document.querySelectorAll('#cam-seg button').forEach(function(b){ b.classList.toggle('active', b.dataset.cam === m); });
+  syncCamModeControls();
   if (m === 'off') stopGestureControl();
   else if (m === 'gesture') startGestureControl();
   saveLyricLayout();
@@ -23732,19 +24717,29 @@ function renderTopSyncAccountPill() {
   '</span>';
 }
 function scheduleStartupAccountContentRefresh(delay) {
-  if (startupAccountContentTimer) return;
+  var nextDelay = Math.max(0, delay == null ? 520 : Number(delay) || 0);
+  if (startupAccountContentTimer) {
+    if (startupAccountContentDelay && startupAccountContentDelay <= nextDelay) return;
+    clearTimeout(startupAccountContentTimer);
+    startupAccountContentTimer = 0;
+  }
+  startupAccountContentDelay = nextDelay;
   startupAccountContentTimer = setTimeout(function(){
     startupAccountContentTimer = 0;
+    startupAccountContentDelay = 0;
     if (!hasAnyPlatformLogin()) return;
     scheduleVisualApply(function(){
       if (!hasAnyPlatformLogin()) return;
       refreshUserPlaylists(true);
-      loadHomeDiscover(true);
-      if (loginStatus && loginStatus.loggedIn) {
-        setTimeout(function(){ syncLikeStatusForSongs(playQueue.concat(playlist || [])); }, 720);
-      }
-    }, 0, 1200);
-  }, Math.max(0, delay == null ? 520 : Number(delay) || 0));
+      setTimeout(function(){
+        if (!hasAnyPlatformLogin()) return;
+        loadHomeDiscover(true);
+      }, 380);
+      setTimeout(function(){
+        syncLikeStatusForSongs(playQueue.concat(playlist || []));
+      }, 1500);
+    }, 120, 1800);
+  }, nextDelay);
 }
 async function refreshLoginStatus(force) {
   var statusOnly = !!(force && typeof force === 'object' && force.statusOnly);
@@ -23824,9 +24819,12 @@ function normalizeQQLoginStatus(info) {
     stale: !!info.stale || !!(info.profileUnavailable && !(info.nickname && info.avatar))
   });
 }
-async function refreshQQLoginStatus() {
+async function refreshQQLoginStatus(opts) {
+  opts = opts || {};
+  var statusOnly = !!opts.statusOnly;
   try {
-    var info = await apiJson('/api/qq/login/status?t=' + Date.now());
+    var quick = statusOnly ? '&quick=1' : '';
+    var info = await apiJson('/api/qq/login/status?t=' + Date.now() + quick);
     var prevLogged = !!qqLoginStatus.loggedIn;
     qqLoginStatus = normalizeQQLoginStatus(info);
     if (!qqLoginStatus.loggedIn) {
@@ -23837,7 +24835,7 @@ async function refreshQQLoginStatus() {
     } else if (!userPlaylists.some(function(pl){ return pl && pl.provider === 'qq'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
-      if (!startupAccountHydrating) {
+      if (!startupAccountHydrating && !statusOnly) {
         loadHomeDiscover(true);
         refreshUserPlaylists(true);
       }
@@ -23902,7 +24900,9 @@ function normalizeSodaLoginStatus(info) {
     stale: !!info.stale
   });
 }
-async function refreshSodaLoginStatus(sync) {
+async function refreshSodaLoginStatus(sync, opts) {
+  opts = opts || {};
+  var statusOnly = !!opts.statusOnly;
   try {
     var quick = startupAccountHydrating && !sync ? '&quick=1' : '';
     var info = await apiJson('/api/soda/login/status?sync=' + (sync ? '1' : '0') + quick + '&t=' + Date.now());
@@ -23916,7 +24916,7 @@ async function refreshSodaLoginStatus(sync) {
     } else if (!userPlaylists.some(function(pl){ return pl && pl.provider === 'soda'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
-      if (!startupAccountHydrating) {
+      if (!startupAccountHydrating && !statusOnly) {
         loadHomeDiscover(true);
         refreshUserPlaylists(true);
       }
@@ -25381,13 +26381,30 @@ function handleVisualGuideSurfaceClick(e) {
 //  动态库加载
 // ============================================================
 function loadScriptOnce(src) {
-  return new Promise(function(resolve, reject){
+  if (!loadScriptOnce.promises) loadScriptOnce.promises = {};
+  if (loadScriptOnce.promises[src]) return loadScriptOnce.promises[src];
+  loadScriptOnce.promises[src] = new Promise(function(resolve, reject){
     var hit = document.querySelector('script[src="' + src + '"]');
-    if (hit) { resolve(); return; }
+    if (hit && hit.getAttribute('data-loaded') === '1') { resolve(); return; }
     var sc = document.createElement('script'); sc.src = src; sc.async = true;
-    sc.onload = resolve; sc.onerror = reject;
+    sc.onload = function(){ sc.setAttribute('data-loaded', '1'); resolve(); };
+    sc.onerror = function(err){ delete loadScriptOnce.promises[src]; reject(err); };
     document.head.appendChild(sc);
   });
+  return loadScriptOnce.promises[src];
+}
+
+async function loadScriptFromCandidates(candidates) {
+  var lastErr = null;
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      await loadScriptOnce(candidates[i]);
+      return candidates[i];
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('SCRIPT_LOAD_FAILED');
 }
 
 // ============================================================
@@ -25403,6 +26420,30 @@ function stopHeadTracking(){}      // stub
 
 var gestureVideo = null, gestureCamera = null, gestureHands = null;
 var gestureActive = false;
+var gestureStarting = false;
+var gestureFrameRaf = 0;
+var gestureFrameBusy = false;
+var gestureFrameErrorCount = 0;
+var gestureLastResultAt = 0;
+var gestureSessionStartedAt = 0;
+var gestureModelReady = false;
+var gestureModelRestarting = false;
+var gestureFramePausedUntil = 0;
+var gestureFrameToken = 0;
+var gestureLifecycleToken = 0;
+var gestureNextRestartAllowedAt = 0;
+var gestureHandsScriptSrc = '';
+var gesturePrewarmPromise = null;
+var gesturePrewarmHands = null;
+var gesturePrewarmClaimed = false;
+var gesturePrewarmStartedAt = 0;
+var gesturePrewarmReadyAt = 0;
+var gesturePrewarmFailedAt = 0;
+var GESTURE_MODEL_INIT_TIMEOUT_MS = 9000;
+var GESTURE_FRAME_TIMEOUT_MS = 1500;
+var GESTURE_FIRST_RESULT_TIMEOUT_MS = 4500;
+var GESTURE_RESULT_STALL_MS = 7000;
+var GESTURE_RESTART_COOLDOWN_MS = 2800;
 // 21 个关键点的平滑缓存 (EMA): [{x,y}, ...]
 var handLmSmooth = null;
 var handLmLastSeen = 0;
@@ -25470,50 +26511,469 @@ var handCanvas = null, handCanvasCtx = null;
 // 平滑系数 (越小越平滑, 但反应越慢)
 var HAND_SMOOTH_ALPHA = 0.35;
 
-async function startGestureControl() {
-  if (gestureActive) return;
-  showToast('正在加载手势识别…');
+var MEDIAPIPE_HANDS_SOURCES = [
+  'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js',
+  'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js',
+  'https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js',
+  'https://unpkg.com/@mediapipe/hands/hands.js'
+];
+
+function mediaPipeBaseFromScript(src) {
+  return String(src || '').replace(/[^/]+$/, '');
+}
+
+function gestureNow() {
+  return typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+function isGestureStartCancelled(err) {
+  return err && err.message === 'GESTURE_START_CANCELLED';
+}
+
+function promiseWithTimeout(promise, timeoutMs, code) {
+  return new Promise(function(resolve, reject){
+    var done = false;
+    var timer = setTimeout(function(){
+      if (done) return;
+      done = true;
+      reject(new Error(code || 'TIMEOUT'));
+    }, timeoutMs);
+    Promise.resolve(promise).then(function(value){
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, function(err){
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+async function loadMediaPipeHandsScript() {
+  if (window.Hands) return gestureHandsScriptSrc || MEDIAPIPE_HANDS_SOURCES[0];
+  var src = await loadScriptFromCandidates(MEDIAPIPE_HANDS_SOURCES);
+  gestureHandsScriptSrc = src;
+  return src;
+}
+
+function gestureSourceCandidates(primarySrc) {
+  var out = [];
+  function push(src) {
+    src = String(src || '').trim();
+    if (src && out.indexOf(src) < 0) out.push(src);
+  }
+  push(primarySrc);
+  MEDIAPIPE_HANDS_SOURCES.forEach(push);
+  return out;
+}
+
+function closeGestureHandsInstance(hands) {
+  try { if (hands && hands.close) hands.close(); } catch(e){}
+}
+
+function attachGestureResults(hands) {
+  hands.onResults(function(res){
+    if (!gestureActive) return;
+    gestureLastResultAt = gestureNow();
+    var lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+    if (!lm) { onHandLost(); return; }
+    processHandFrame(lm);
+  });
+}
+
+async function createGestureHandsWithBase(baseUrl) {
+  if (!window.Hands) throw new Error('GESTURE_HANDS_CLASS_MISSING');
+  var hands = new window.Hands({ locateFile: function(f){ return baseUrl + f; } });
+  // 更轻的模型能明显降低 DIY 视觉区的卡顿，并且对触碰/捏合/握拳已足够稳定。
+  hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.48, minTrackingConfidence: 0.45 });
+  attachGestureResults(hands);
+  if (typeof hands.initialize === 'function') {
+    await promiseWithTimeout(hands.initialize(), GESTURE_MODEL_INIT_TIMEOUT_MS, 'GESTURE_MODEL_INIT_TIMEOUT');
+  }
+  return hands;
+}
+
+async function createGestureHandsWithFallback(primarySrc) {
+  var sources = gestureSourceCandidates(primarySrc);
+  var lastErr = null;
+  for (var i = 0; i < sources.length; i++) {
+    var base = mediaPipeBaseFromScript(sources[i]);
+    var hands = null;
+    try {
+      hands = await createGestureHandsWithBase(base);
+      gestureHandsScriptSrc = sources[i];
+      return hands;
+    } catch (err) {
+      lastErr = err;
+      closeGestureHandsInstance(hands);
+      if (i < sources.length - 1) console.warn('Gesture model source failed, trying fallback:', sources[i], err);
+    }
+  }
+  throw lastErr || new Error('GESTURE_MODEL_UNAVAILABLE');
+}
+
+function takePrewarmedGestureHands() {
+  if (!gesturePrewarmHands) return null;
+  var hands = gesturePrewarmHands;
+  gesturePrewarmHands = null;
+  gesturePrewarmClaimed = false;
+  return hands;
+}
+
+async function acquireGestureHands(primarySrc) {
+  var warmed = takePrewarmedGestureHands();
+  if (warmed) return warmed;
+
+  if (gesturePrewarmPromise) {
+    gesturePrewarmClaimed = true;
+    await gesturePrewarmPromise.catch(function(){ return null; });
+    warmed = takePrewarmedGestureHands();
+    if (warmed) return warmed;
+  }
+
+  var scriptSrc = primarySrc || await loadMediaPipeHandsScript();
+  return createGestureHandsWithFallback(scriptSrc);
+}
+
+function scheduleGestureModelPrewarm(reason, delay) {
+  delay = Math.max(0, delay == null ? 900 : Number(delay) || 0);
+  setTimeout(function(){
+    if (gestureActive || gestureStarting || gesturePrewarmHands || gesturePrewarmPromise) return;
+    scheduleUiWarmTask(function(){
+      prewarmGestureModel(reason || 'startup');
+    }, 1200);
+  }, delay);
+}
+
+function prewarmGestureModel(reason) {
+  if (gestureActive || gestureStarting) return gesturePrewarmPromise || Promise.resolve(null);
+  if (gesturePrewarmHands) return Promise.resolve(gesturePrewarmHands);
+  if (gesturePrewarmPromise) return gesturePrewarmPromise;
+
+  gesturePrewarmStartedAt = gestureNow();
+  gesturePrewarmPromise = (async function(){
+    var scriptSrc = await loadMediaPipeHandsScript();
+    var hands = await createGestureHandsWithFallback(scriptSrc);
+    if ((gestureActive || gestureStarting) && !gesturePrewarmClaimed) {
+      closeGestureHandsInstance(hands);
+      return null;
+    }
+    gesturePrewarmHands = hands;
+    gesturePrewarmReadyAt = gestureNow();
+    gesturePrewarmFailedAt = 0;
+    return hands;
+  })().catch(function(err){
+    gesturePrewarmClaimed = false;
+    gesturePrewarmFailedAt = gestureNow();
+    console.warn('Gesture model prewarm failed:', reason || 'startup', err);
+    return null;
+  }).finally(function(){
+    gesturePrewarmPromise = null;
+  });
+
+  return gesturePrewarmPromise;
+}
+
+function waitForVideoMetadata(video) {
+  return new Promise(function(resolve, reject){
+    if (video.readyState >= 1 && video.videoWidth && video.videoHeight) {
+      resolve();
+      return;
+    }
+    var timer = setTimeout(function(){
+      cleanup();
+      reject(new Error('CAMERA_METADATA_TIMEOUT'));
+    }, 4500);
+    function cleanup() {
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onReady);
+      video.removeEventListener('canplay', onReady);
+      video.removeEventListener('error', onError);
+    }
+    function onReady() {
+      if (!video.videoWidth && !video.videoHeight) return;
+      cleanup();
+      resolve();
+    }
+    function onError() {
+      cleanup();
+      reject(new Error('CAMERA_VIDEO_ERROR'));
+    }
+    video.addEventListener('loadedmetadata', onReady);
+    video.addEventListener('canplay', onReady);
+    video.addEventListener('error', onError);
+  });
+}
+
+async function startGestureVideoStream(targetVideo) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('CAMERA_API_UNAVAILABLE');
+  }
+  targetVideo = targetVideo || gestureVideo;
+  if (!targetVideo) throw new Error('GESTURE_START_CANCELLED');
+  var stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 30, max: 30 },
+      facingMode: 'user'
+    },
+    audio: false
+  });
+  if (!gestureActive || targetVideo !== gestureVideo) {
+    try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+    throw new Error('GESTURE_START_CANCELLED');
+  }
+  targetVideo.srcObject = stream;
   try {
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
+    await waitForVideoMetadata(targetVideo);
+    var playPromise = targetVideo.play();
+    if (playPromise && typeof playPromise.then === 'function') {
+      await promiseWithTimeout(playPromise, 3500, 'CAMERA_PLAY_TIMEOUT');
+    }
+  } catch (err) {
+    try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+    throw err;
+  }
+}
+
+function scheduleGestureFrame() {
+  if (!gestureActive) return;
+  if (gestureFrameRaf) cancelAnimationFrame(gestureFrameRaf);
+  gestureFrameRaf = requestAnimationFrame(pumpGestureFrame);
+}
+
+function handleGestureFrameError(err, fromTimeout) {
+  gestureFrameErrorCount += 1;
+  if (gestureFrameErrorCount <= 3) console.warn(fromTimeout ? 'Gesture frame timed out:' : 'Gesture frame failed:', err);
+  if (gestureFrameErrorCount < 3 && !fromTimeout) {
+    gestureFramePausedUntil = gestureNow() + 120 * gestureFrameErrorCount;
+    showGestureHUD('识别初始化中', 0.16, '摄像头已开启，正在等待手势模型');
+    return;
+  }
+  restartGestureModel(fromTimeout ? 'frame-timeout' : 'frame-error');
+}
+
+function monitorGestureResultFlow(now) {
+  if (!gestureActive || !gestureModelReady || gestureModelRestarting) return;
+  if (!gestureLastResultAt) {
+    var sinceStart = now - gestureSessionStartedAt;
+    if (sinceStart > GESTURE_FIRST_RESULT_TIMEOUT_MS) {
+      showGestureHUD('识别初始化中', 0.14, '摄像头正常，正在连接手势模型');
+    }
+    if (sinceStart > GESTURE_RESULT_STALL_MS) {
+      restartGestureModel('no-result');
+    }
+    return;
+  }
+  if (now - gestureLastResultAt > GESTURE_RESULT_STALL_MS) {
+    restartGestureModel('result-stall');
+  }
+}
+
+async function restartGestureModel(reason) {
+  if (!gestureActive || gestureModelRestarting) return;
+  var now = gestureNow();
+  if (now < gestureNextRestartAllowedAt) {
+    gestureFramePausedUntil = now + 500;
+    if (gestureActive && !gestureFrameRaf) scheduleGestureFrame();
+    return;
+  }
+  gestureNextRestartAllowedAt = now + GESTURE_RESTART_COOLDOWN_MS;
+  gestureModelRestarting = true;
+  gestureModelReady = false;
+  gestureFrameBusy = false;
+  gestureFramePausedUntil = now + 500;
+  gestureFrameToken += 1;
+  if (gestureFrameRaf) {
+    cancelAnimationFrame(gestureFrameRaf);
+    gestureFrameRaf = 0;
+  }
+  showGestureHUD('识别重连中', 0.18, '摄像头已开启，正在恢复手势模型');
+  var oldHands = gestureHands;
+  gestureHands = null;
+  closeGestureHandsInstance(oldHands);
+  try {
+    var restartToken = gestureLifecycleToken;
+    var scriptSrc = await loadMediaPipeHandsScript();
+    var nextHands = await acquireGestureHands(scriptSrc);
+    if (!gestureActive || restartToken !== gestureLifecycleToken) {
+      closeGestureHandsInstance(nextHands);
+      return;
+    }
+    gestureHands = nextHands;
+    gestureModelReady = true;
+    gestureFrameErrorCount = 0;
+    gestureLastResultAt = 0;
+    gestureSessionStartedAt = gestureNow();
+    gestureFramePausedUntil = 0;
+    showGestureHUD('待命', 0, reason === 'no-result' ? '模型已重连，把手放进视野' : '继续识别手势');
+  } catch (err) {
+    console.warn('Gesture model restart failed:', err);
+    if (gestureActive) {
+      showGestureHUD('识别异常', 0.1, '手势模型暂时不可用，请关闭后重新开启');
+      showToast('手势识别连接失败，请稍后重试');
+    }
+  } finally {
+    gestureModelRestarting = false;
+    if (gestureActive) scheduleGestureFrame();
+  }
+}
+
+function pumpGestureFrame() {
+  gestureFrameRaf = 0;
+  if (!gestureActive) return;
+  if (gestureModelRestarting || !gestureVideo) {
+    scheduleGestureFrame();
+    return;
+  }
+  if (!gestureHands || !gestureModelReady) {
+    restartGestureModel('missing-model');
+    if (!gestureModelRestarting) scheduleGestureFrame();
+    return;
+  }
+  var now = gestureNow();
+  if (now < gestureFramePausedUntil) {
+    scheduleGestureFrame();
+    return;
+  }
+  monitorGestureResultFlow(now);
+  if (!gestureActive || gestureModelRestarting || !gestureHands) return;
+  if (gestureFrameBusy || gestureVideo.readyState < 2 || !gestureVideo.videoWidth) {
+    scheduleGestureFrame();
+    return;
+  }
+  gestureFrameBusy = true;
+  var token = ++gestureFrameToken;
+  var finished = false;
+  var timer = setTimeout(function(){
+    if (finished || token !== gestureFrameToken) return;
+    finished = true;
+    gestureFrameToken += 1;
+    gestureFrameBusy = false;
+    handleGestureFrameError(new Error('GESTURE_FRAME_TIMEOUT'), true);
+  }, GESTURE_FRAME_TIMEOUT_MS);
+  function finishFrame(ok, err) {
+    if (finished || token !== gestureFrameToken) return;
+    finished = true;
+    clearTimeout(timer);
+    if (ok) {
+      gestureFrameErrorCount = 0;
+    } else {
+      handleGestureFrameError(err, false);
+    }
+    gestureFrameBusy = false;
+    if (gestureActive && !gestureModelRestarting) scheduleGestureFrame();
+  }
+  try {
+    Promise.resolve(gestureHands.send({ image: gestureVideo })).then(function(){
+      finishFrame(true);
+    }).catch(function(err){
+      finishFrame(false, err);
+    });
+  } catch (err) {
+    finishFrame(false, err);
+  }
+}
+
+async function startGestureControl() {
+  if (gestureActive || gestureStarting) return;
+  gestureStarting = true;
+  var startToken = ++gestureLifecycleToken;
+  var handsPromise = null;
+  showToast('正在开启手势…');
+  try {
+    handsPromise = acquireGestureHands();
     gestureVideo = document.createElement('video');
-    gestureVideo.playsInline = true; gestureVideo.muted = true;
+    gestureVideo.playsInline = true;
+    gestureVideo.setAttribute('playsinline', '');
+    gestureVideo.setAttribute('webkit-playsinline', '');
+    gestureVideo.muted = true;
+    gestureVideo.autoplay = true;
     gestureVideo.style.display = 'none';
     document.body.appendChild(gestureVideo);
-    gestureHands = new Hands({ locateFile: function(f){ return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/' + f; } });
-    // modelComplexity:1 比 0 更稳定, 但仍流畅. 提高 confidence 减少误检
-    gestureHands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
-    gestureHands.onResults(function(res){
-      if (!gestureActive) return;
-      var lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
-      if (!lm) { onHandLost(); return; }
-      processHandFrame(lm);
-    });
-    gestureCamera = new Camera(gestureVideo, { onFrame: async function(){ if (gestureHands) await gestureHands.send({ image: gestureVideo }); }, width: 480, height: 360 });
-    await gestureCamera.start();
-    gestureActive = true;
     // 准备 hand canvas
     handCanvas = document.getElementById('hand-canvas');
-    handCanvasCtx = handCanvas.getContext('2d');
-    resizeHandCanvas();
-    handCanvas.classList.add('show');
-    showToast('手势已开启: 手掌推开 · 捏合旋转 · 握拳收束');
+    handCanvasCtx = handCanvas ? handCanvas.getContext('2d') : null;
+    if (handCanvas) {
+      resizeHandCanvas();
+      handCanvas.classList.add('show');
+    }
+    gestureActive = true;
+    gestureModelReady = false;
+    gestureModelRestarting = false;
+    gestureFrameErrorCount = 0;
+    gestureLastResultAt = 0;
+    gestureSessionStartedAt = gestureNow();
+    gestureFramePausedUntil = 0;
+    gestureFrameToken += 1;
+    await startGestureVideoStream(gestureVideo);
+    if (startToken !== gestureLifecycleToken) throw new Error('GESTURE_START_CANCELLED');
+    showToast('摄像头已开启，手势识别准备中');
+    showGestureHUD('识别准备中', 0.18, gesturePrewarmReadyAt ? '正在接入手势模型' : '手势模型正在预热');
+    var nextHands = await handsPromise;
+    if (startToken !== gestureLifecycleToken || !gestureActive) {
+      closeGestureHandsInstance(nextHands);
+      throw new Error('GESTURE_START_CANCELLED');
+    }
+    gestureHands = nextHands;
+    gestureModelReady = true;
+    gestureFrameErrorCount = 0;
+    gestureLastResultAt = 0;
+    gestureSessionStartedAt = gestureNow();
+    gestureFramePausedUntil = 0;
+    scheduleGestureFrame();
+    showToast('手势已就绪: 手掌推开 · 捏合旋转 · 握拳收束');
     showGestureHUD('待命', 0, '把手放进视野');
   } catch (e) {
-    console.warn('Gesture failed:', e);
-    showToast('手势启动失败 (需要摄像头权限)');
+    if (handsPromise && !gestureHands) {
+      handsPromise.then(function(hands){ closeGestureHandsInstance(hands); }).catch(function(){});
+    }
+    if (!isGestureStartCancelled(e)) {
+      console.warn('Gesture failed:', e);
+      showToast('手势启动失败 (需要摄像头权限)');
+    }
+    cleanupGestureControl();
     fx.cam = 'off';
     document.querySelectorAll('#cam-seg button').forEach(function(b){ b.classList.toggle('active', b.dataset.cam === 'off'); });
+  } finally {
+    gestureStarting = false;
+  }
+}
+
+function cleanupGestureControl() {
+  gestureLifecycleToken += 1;
+  gestureFrameToken += 1;
+  if (gestureFrameRaf) {
+    cancelAnimationFrame(gestureFrameRaf);
+    gestureFrameRaf = 0;
+  }
+  try { if (gestureCamera && gestureCamera.stop) gestureCamera.stop(); } catch(e){}
+  try { if (gestureVideo && gestureVideo.srcObject) gestureVideo.srcObject.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
+  try { if (gestureVideo) gestureVideo.remove(); } catch(e){}
+  closeGestureHandsInstance(gestureHands);
+  gestureVideo = null; gestureHands = null; gestureCamera = null;
+  gestureActive = false;
+  gestureStarting = false;
+  gestureFrameBusy = false;
+  gestureFrameErrorCount = 0;
+  gestureLastResultAt = 0;
+  gestureSessionStartedAt = 0;
+  gestureModelReady = false;
+  gestureModelRestarting = false;
+  gestureFramePausedUntil = 0;
+  if (handCanvas) {
+    handCanvas.classList.remove('show');
+    if (handCanvasCtx) handCanvasCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
   }
 }
 
 function stopGestureControl() {
-  if (!gestureActive) return;
-  try { if (gestureCamera && gestureCamera.stop) gestureCamera.stop(); } catch(e){}
-  try { if (gestureVideo && gestureVideo.srcObject) gestureVideo.srcObject.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
-  try { if (gestureVideo) gestureVideo.remove(); } catch(e){}
-  gestureVideo = null; gestureHands = null; gestureCamera = null;
-  gestureActive = false;
+  if (!gestureActive && !gestureStarting && !gestureVideo && !gestureHands && !gestureFrameRaf) return;
+  cleanupGestureControl();
   pinchState.active = false;
   handLmSmooth = null;
   uniforms.uHandActive.value = 0;
@@ -25521,7 +26981,8 @@ function stopGestureControl() {
   gestureGrip.value = 0;
   gestureGrip.target = 0;
   gestureGrip.openness = 1;
-  document.getElementById('gesture-hud').classList.remove('show');
+  var hud = document.getElementById('gesture-hud');
+  if (hud) hud.classList.remove('show');
   if (handCanvas) {
     handCanvas.classList.remove('show');
     if (handCanvasCtx) handCanvasCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
@@ -25535,7 +26996,7 @@ function resizeHandCanvas() {
   handCanvas.height = innerHeight * dpr;
   handCanvas.style.width = innerWidth + 'px';
   handCanvas.style.height = innerHeight + 'px';
-  handCanvasCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (handCanvasCtx) handCanvasCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 window.addEventListener('resize', resizeHandCanvas);
 
@@ -25781,8 +27242,10 @@ function tickGestureRotation(dt) {
 function showGestureHUD(label, progress, detail) {
   var hud = document.getElementById('gesture-hud');
   if (!hud) return;
-  document.getElementById('gesture-label').textContent = label || '待命';
-  document.getElementById('gesture-confirm').textContent = detail || '将手放进摄像头视野';
+  var labelEl = document.getElementById('gesture-label');
+  var detailEl = document.getElementById('gesture-confirm');
+  if (labelEl) labelEl.textContent = label || '待命';
+  if (detailEl) detailEl.textContent = detail || '将手放进摄像头视野';
   var fill = document.getElementById('gesture-fill');
   if (fill) fill.style.width = Math.max(0, Math.min(100, (progress || 0) * 100)) + '%';
   hud.classList.add('show');
@@ -26785,7 +28248,8 @@ document.addEventListener('DOMContentLoaded', function(){
   if (!s) return;
   markAppPerf('dom-content-loaded');
   armSplashSoundFallback();
-  prewarmHomeWallpaperPreview();
+  setTimeout(prewarmHomeWallpaperPreview, 1600);
+  scheduleGestureModelPrewarm('startup', 650);
   function requestSplashEnter() {
     playMineradioIntroSound();
     if (splashReadyToEnter) dismissSplash();
@@ -26800,11 +28264,11 @@ document.addEventListener('DOMContentLoaded', function(){
   });
   if (reduceSplashMotion) {
     s.classList.add('reduce-motion');
-    splashTimer = setTimeout(markSplashReadyToEnter, 900);
+    splashTimer = setTimeout(markSplashReadyToEnter, 420);
     return;
   }
   playMineradioIntroSound();
-  splashTimer = setTimeout(markSplashReadyToEnter, 5000);
+  splashTimer = setTimeout(markSplashReadyToEnter, 1050);
 });
 
 var desktopOverlayPushState = {
@@ -27186,6 +28650,7 @@ applyDiyMode(diyPlayerMode, { save: false });
 bindFxPanel();
 applySavedLyricPaletteState();
 bindQualityControl();
+bindPlaybackRateControl();
 bindVolumeControls();
 initControlGlassSurface();
 bindPlayerControlAnimations();
@@ -27193,10 +28658,12 @@ scheduleUiWarmTask(function(){
   updateControlGlassDisplacementMap();
   updateSearchBoxGlassDisplacementMap();
   updateSearchPillGlassDisplacementMap();
+}, 900);
+scheduleUiWarmTask(function(){
   try {
     if (renderer && renderer.compile && scene && camera) renderer.compile(scene, camera);
   } catch (e) {}
-}, 900);
+}, 3200);
 applyUserCapsuleAutoHideState();
 applyFxFabAutoHideState();
 applyControlsAutoHidePreference();
@@ -27210,30 +28677,61 @@ if (fx.floatLayer) createFloatLayer();
 if (fx.particleLyrics) createLyricsParticles();
 if (fx.backCover) createBackCoverLayer();
 initIdleGuideCanvas();
-startupAccountHydrating = true;
-var startupLoginStatusPromise = Promise.all([
-  refreshLoginStatus({ statusOnly: true }),
-  refreshQQLoginStatus(),
-  refreshSodaLoginStatus(false)
-]).finally(function(){
+function finishStartupAccountHydration(reason) {
+  if (!startupAccountHydrating) return;
   startupAccountHydrating = false;
+  applySavedAccountScopePreference();
+  renderUserBtn();
+  if (hasAnyPlatformLogin()) {
+    scheduleStartupAccountContentRefresh(document.body.classList.contains('splash-active') ? 1800 : 900);
+  }
+  if (document.body.classList.contains('splash-active')) return;
+  var homeShown = updateEmptyHomeVisibility({ forceLoad: false });
+  if (!hasAnyPlatformLogin()) maybeRunStartupLoginGuide(reason || 'status');
+  else if (!homeShown) maybeRunStartupLoginGuide(reason || 'status');
+}
+function scheduleStartupLoginStatusTask(delay, task) {
+  return new Promise(function(resolve){
+    setTimeout(function(){
+      scheduleVisualApply(function(){
+        Promise.resolve()
+          .then(task)
+          .then(function(value){
+            applySavedAccountScopePreference();
+            renderUserBtn();
+            if (hasAnyPlatformLogin()) scheduleStartupAccountContentRefresh(document.body.classList.contains('splash-active') ? 2200 : 1100);
+            resolve(value);
+          })
+          .catch(function(err){
+            console.warn('startup login task failed:', err);
+            resolve(null);
+          });
+      }, 0, 900);
+    }, Math.max(0, delay || 0));
+  });
+}
+startupAccountHydrating = true;
+startupPlaybackRestoreReady = true;
+scheduleStartupPlaybackRestore(360);
+scheduleVisualApply(function(){
+  if (!document.body.classList.contains('splash-active')) updateEmptyHomeVisibility({ forceLoad: false });
+}, 260, 900);
+var startupLoginStatusPromise = Promise.allSettled([
+  scheduleStartupLoginStatusTask(80, function(){ return refreshLoginStatus({ statusOnly: true }); }),
+  scheduleStartupLoginStatusTask(520, function(){ return refreshQQLoginStatus({ statusOnly: true }); }),
+  scheduleStartupLoginStatusTask(1180, function(){ return refreshSodaLoginStatus(false, { statusOnly: true }); })
+]).finally(function(){
+  finishStartupAccountHydration('status');
 });
+setTimeout(function(){
+  finishStartupAccountHydration('timeout');
+}, 3600);
 startNeteaseLoginStatusAutoRefresh();
 startQQLoginStatusAutoRefresh();
 startSodaLoginStatusAutoRefresh();
 if (startupLoginStatusPromise && startupLoginStatusPromise.then) {
   startupLoginStatusPromise.then(function(){
-    applySavedAccountScopePreference();
-    renderUserBtn();
-    if (hasAnyPlatformLogin()) {
-      scheduleStartupAccountContentRefresh(document.body.classList.contains('splash-active') ? 1200 : 420);
-    }
-    startupPlaybackRestoreReady = true;
-    scheduleStartupPlaybackRestore(260);
-    if (document.body.classList.contains('splash-active')) return;
-    var homeShown = updateEmptyHomeVisibility({ forceLoad: hasAnyPlatformLogin() });
-    if (!hasAnyPlatformLogin()) maybeRunStartupLoginGuide('status');
-    else if (!homeShown) maybeRunStartupLoginGuide('status');
+    finishStartupAccountHydration('status');
   });
 }
 var collectNameInput = document.getElementById('collect-new-name');
@@ -27803,6 +29301,7 @@ scheduleNextRenderFrame(0);
   if (typeof closeVisualGuide === 'function') window.closeVisualGuide = closeVisualGuide;
   if (typeof closeVolumePanelSoon === 'function') window.closeVolumePanelSoon = closeVolumePanelSoon;
   if (typeof closeWeatherRegionModal === 'function') window.closeWeatherRegionModal = closeWeatherRegionModal;
+  if (typeof addCollectTargetToPlaylist === 'function') window.addCollectTargetToPlaylist = addCollectTargetToPlaylist;
   if (typeof collectArtistDetailSong === 'function') window.collectArtistDetailSong = collectArtistDetailSong;
   if (typeof collectDetailSong === 'function') window.collectDetailSong = collectDetailSong;
   if (typeof collectHistorySong === 'function') window.collectHistorySong = collectHistorySong;
@@ -28672,6 +30171,7 @@ scheduleNextRenderFrame(0);
   if (typeof setPeek === 'function') window.setPeek = setPeek;
   if (typeof setPerformanceBackgroundMode === 'function') window.setPerformanceBackgroundMode = setPerformanceBackgroundMode;
   if (typeof setPerformanceQualityMode === 'function') window.setPerformanceQualityMode = setPerformanceQualityMode;
+  if (typeof setPlaybackRate === 'function') window.setPlaybackRate = setPlaybackRate;
   if (typeof setPlayIcon === 'function') window.setPlayIcon = setPlayIcon;
   if (typeof setPlaybackQuality === 'function') window.setPlaybackQuality = setPlaybackQuality;
   if (typeof setPlaylistPanelPinned === 'function') window.setPlaylistPanelPinned = setPlaylistPanelPinned;
@@ -28786,6 +30286,7 @@ scheduleNextRenderFrame(0);
   if (typeof startColorMixTween === 'function') window.startColorMixTween = startColorMixTween;
   if (typeof startHeadTracking === 'function') window.startHeadTracking = startHeadTracking;
   if (typeof startHotkeyCapture === 'function') window.startHotkeyCapture = startHotkeyCapture;
+  if (typeof startGestureControl === 'function') window.startGestureControl = startGestureControl;
   if (typeof startLocalBeatAnalysis === 'function') window.startLocalBeatAnalysis = startLocalBeatAnalysis;
   if (typeof startNeteaseLoginStatusAutoRefresh === 'function') window.startNeteaseLoginStatusAutoRefresh = startNeteaseLoginStatusAutoRefresh;
   if (typeof startPlaybackFadeIn === 'function') window.startPlaybackFadeIn = startPlaybackFadeIn;
@@ -28857,6 +30358,7 @@ scheduleNextRenderFrame(0);
   if (typeof toggleLikeCurrent === 'function') window.toggleLikeCurrent = toggleLikeCurrent;
   if (typeof toggleLikeDetailSong === 'function') window.toggleLikeDetailSong = toggleLikeDetailSong;
   if (typeof toggleLikeQueueIndex === 'function') window.toggleLikeQueueIndex = toggleLikeQueueIndex;
+  if (typeof toggleSpeedPanel === 'function') window.toggleSpeedPanel = toggleSpeedPanel;
   if (typeof toggleLikeSearchResult === 'function') window.toggleLikeSearchResult = toggleLikeSearchResult;
   if (typeof toggleLyricGlowLink === 'function') window.toggleLyricGlowLink = toggleLyricGlowLink;
   if (typeof toggleLyricsPanel === 'function') window.toggleLyricsPanel = toggleLyricsPanel;

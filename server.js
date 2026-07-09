@@ -134,6 +134,18 @@ function applySystemCertificateAuthorities() {
 
 applySystemCertificateAuthorities();
 
+function watchParentProcess() {
+  const parentPid = Number.parseInt(process.env.MINERADIO_PARENT_PID || '', 10);
+  if (!parentPid || parentPid === process.pid) return;
+  const timer = setInterval(() => {
+    try { process.kill(parentPid, 0); }
+    catch (e) { process.exit(0); }
+  }, 5000);
+  if (timer.unref) timer.unref();
+}
+
+watchParentProcess();
+
 // ---------- Cookie 持久化 ----------
 let userCookie = '';
 try { if (fs.existsSync(COOKIE_FILE)) userCookie = fs.readFileSync(COOKIE_FILE, 'utf8').trim(); }
@@ -1864,6 +1876,20 @@ function shuffledSample(list, limit) {
   }
   return arr.slice(0, limit || arr.length);
 }
+function stableDailySample(list, limit, seed) {
+  const now = new Date();
+  const day = [now.getFullYear(), now.getMonth() + 1, now.getDate()].join('-');
+  return (Array.isArray(list) ? list : [])
+    .slice()
+    .sort((a, b) => {
+      const ak = String((a && (a.provider || a.source || a.type)) || '') + ':' + String((a && (a.sodaId || a.mid || a.id || a.name)) || '');
+      const bk = String((b && (b.provider || b.source || b.type)) || '') + ':' + String((b && (b.sodaId || b.mid || b.id || b.name)) || '');
+      const ah = crypto.createHash('sha1').update(String(seed || '') + ':' + day + ':' + ak).digest('hex');
+      const bh = crypto.createHash('sha1').update(String(seed || '') + ':' + day + ':' + bk).digest('hex');
+      return ah.localeCompare(bh);
+    })
+    .slice(0, limit || 30);
+}
 function mapDiscoverPlaylist(pl, tag) {
   pl = pl || {};
   const creator = pl.creator || pl.user || {};
@@ -1883,7 +1909,18 @@ function mapDiscoverPlaylist(pl, tag) {
 }
 function isNeteaseLikedPlaylist(pl) {
   const name = String(pl && pl.name || '').toLowerCase();
-  return /我喜欢|喜欢的音乐|liked|favorite/.test(name);
+  return Number(pl && pl.specialType || 0) === 5 || /我喜欢|喜欢的音乐|liked|favorite/.test(name);
+}
+async function isUserNeteaseLikedPlaylistId(pid, info) {
+  if (!pid || !info || !info.userId) return false;
+  try {
+    const r = await user_playlist({ uid: info.userId, limit: 100, cookie: userCookie, timestamp: Date.now() });
+    const list = (r.body && r.body.playlist) || [];
+    return list.some(pl => String(pl && pl.id || '') === String(pid) && isNeteaseLikedPlaylist(pl));
+  } catch (err) {
+    console.warn('[PlaylistAddSong] liked playlist probe failed:', err.message);
+    return false;
+  }
 }
 function chooseRadarPlaylist(playlists) {
   const list = Array.isArray(playlists) ? playlists : [];
@@ -1901,8 +1938,27 @@ function isLowSignalPodcastItem(item) {
   return /购买播客|付费精品|qzone|空间背景音乐|背景音乐|四只烤翅|试纸烤翅/i.test(text);
 }
 
+function isProviderFavoritePlaylistName(value) {
+  const name = String(value || '').trim().toLowerCase();
+  return /liked|favorite|heart|love/i.test(name)
+    || /\u6211\u559c\u6b22|\u559c\u6b22\u7684\u97f3\u4e50|\u7ea2\u5fc3/.test(name);
+}
+
+function isProviderReadonlyPlaylistName(value) {
+  const name = String(value || '').trim().toLowerCase();
+  return /local\s*upload|douyin|tiktok/i.test(name)
+    || /\u672c\u5730\u4e0a\u4f20|\u6296\u97f3\u6536\u85cf\u7684\u97f3\u4e50/.test(name);
+}
+
 function isQQFavoritePlaylist(pl) {
-  const name = String(pl && pl.name || '').trim();
+  if (!pl) return false;
+  if (pl.favorite === true || Number(pl.specialType || pl.special_type || 0) === 5) return true;
+  const rawDirId = String(pl.dirid || pl.dir_id || pl.writeId || '').trim();
+  if (rawDirId === '201') return true;
+  const normalizedQQFavoriteName = String(pl.name || pl.diss_name || pl.dissname || pl.title || '').trim().toLowerCase();
+  if (isProviderFavoritePlaylistName(normalizedQQFavoriteName)) return true;
+  if (/我喜欢|我的喜欢|喜欢的音乐|liked|favorite|heart/i.test(normalizedQQFavoriteName)) return true;
+  const name = String(pl.name || pl.diss_name || pl.dissname || pl.title || '').trim();
   return /我喜欢|我的喜欢|喜欢的音乐/i.test(name);
 }
 
@@ -1941,6 +1997,16 @@ function qqMusicComm(withAuth) {
   const comm = { uin, format: 'json', ct: musicKey ? 19 : 24, cv: 0 };
   if (withAuth && musicKey) comm.authst = musicKey;
   return comm;
+}
+
+function qqCSRFToken(withAuth) {
+  const cookieObj = qqCookieObject();
+  const key = withAuth
+    ? (qqCookieMusicKey(cookieObj) || cookieObj.p_skey || cookieObj.skey || cookieObj.p_lkey || cookieObj.lskey || '')
+    : (cookieObj.skey || qqCookieMusicKey(cookieObj) || '');
+  let hash = 5381;
+  for (let i = 0; i < key.length; i++) hash += (hash << 5) + key.charCodeAt(i);
+  return hash & 0x7fffffff;
 }
 
 function looksLikeQQSongItem(item) {
@@ -2277,6 +2343,16 @@ async function handleDiscoverHome(provider) {
     user: null,
     users: [ne, qq, soda].filter(item => item && item.loggedIn).map(item => item.user).filter(Boolean),
     dailySongs: mergeDiscoverLists([ne.dailySongs, qq.dailySongs, soda.dailySongs], 16),
+    dailyByProvider: {
+      netease: ne.dailySongs || [],
+      qq: qq.dailySongs || [],
+      soda: soda.dailySongs || [],
+    },
+    providerLoggedIn: {
+      netease: !!ne.loggedIn,
+      qq: !!qq.loggedIn,
+      soda: !!soda.loggedIn,
+    },
     playlists: mergeDiscoverLists([ne.playlists, qq.playlists, soda.playlists], 14),
     podcasts: mergeDiscoverLists([ne.podcasts, qq.podcasts, soda.podcasts], 8),
     radarSongs: mergeDiscoverLists([ne.radarSongs, qq.radarSongs, soda.radarSongs], 24),
@@ -2401,6 +2477,7 @@ const SODA_CLIENT_GLOBAL_SCAN_MS = Math.max(3000, Math.min(30000, Number(process
 const SODA_USER_DATA_SCAN_CACHE_MS = 60 * 1000;
 const SODA_USER_DATA_SCAN_MAX_FILES = Math.max(180, Math.min(600, Number(process.env.SODA_USER_DATA_SCAN_MAX_FILES) || 360));
 const SODA_USER_DATA_SCAN_MAX_MS = Math.max(1000, Math.min(15000, Number(process.env.SODA_USER_DATA_SCAN_MAX_MS) || 9000));
+const SODA_LOCAL_SYNC_WORKER_TIMEOUT_MS = Math.max(6000, Math.min(45000, Number(process.env.SODA_LOCAL_SYNC_WORKER_TIMEOUT_MS) || 22000));
 let sodaAutoSyncEnabled = true;
 let sodaDeviceInfoCache = null;
 let sodaNativeSecurity = null;
@@ -2410,6 +2487,7 @@ let sodaLastLocalSync = { checkedAt: 0, clientDir: '', userDataDirs: [], cookieD
 let sodaLastLoginProbe = null;
 let sodaOfficialClientDirCache = null;
 let sodaUserDataDiscoveryCache = { scannedAt: 0, dirs: [], cookieDbs: [] };
+let sodaLocalSyncWorkerPromise = null;
 const sodaPlaybackSessions = new Map();
 
 function clearSodaRuntimeCaches(opts) {
@@ -2892,7 +2970,7 @@ function readSodaBuildId(versionDir) {
 
 function sodaUserAgent(opts) {
   opts = opts || {};
-  const versionDir = sodaNativeSecurity && sodaNativeSecurity.clientDir || (opts.noClientScan ? '' : resolveSodaOfficialClientDir());
+  const versionDir = sodaNativeSecurity && sodaNativeSecurity.clientDir || (opts.noClientScan ? '' : resolveSodaOfficialClientDir({ allowGlobalScan: false }));
   const buildId = process.env.SODA_BUILD_ID || readSodaBuildId(versionDir);
   return `LunaPC/${SODA_APP_VERSION}(${buildId || SODA_DEFAULT_BUILD_ID})`;
 }
@@ -2954,7 +3032,8 @@ function sodaBdticketSettings() {
 function readSodaDeviceInfoFresh() {
   const dirs = uniqueExistingOrder(
     (sodaLastLocalSync.userDataDirs || [])
-      .concat(sodaKnownUserDataDirs({ discover: true }))
+      .concat(sodaUserDataDiscoveryCache.dirs || [])
+      .concat(sodaKnownUserDataDirs({ discover: false }))
   );
   for (const dir of dirs) {
     const file = dir ? path.join(dir, 'DeviceV1') : '';
@@ -2979,7 +3058,7 @@ function initSodaNativeSecurity() {
   if (sodaNativeSecurity && sodaNativeSecurity.ready) return sodaNativeSecurity;
   const state = sodaNativeSecurity || { ready: false, bdms: null, bdticket: null, device: null, clientDir: '', bdticketStarted: false, bdmsInitedForDevice: '' };
   sodaNativeSecurity = state;
-  const clientDir = resolveSodaOfficialClientDir();
+  const clientDir = resolveSodaOfficialClientDir({ allowGlobalScan: false });
   state.clientDir = clientDir;
   if (!clientDir) return state;
   try {
@@ -3020,7 +3099,7 @@ function initSodaNativeSecurity() {
 function sodaNativeDevice() {
   const native = initSodaNativeSecurity();
   if (native.device && typeof native.device.decodeSpade === 'function') return native.device;
-  const clientDir = native.clientDir || resolveSodaOfficialClientDir();
+  const clientDir = native.clientDir || resolveSodaOfficialClientDir({ allowGlobalScan: false });
   try {
     if (clientDir && fs.existsSync(sodaDeviceNodePath(clientDir))) {
       native.device = require(sodaDeviceNodePath(clientDir));
@@ -3814,11 +3893,12 @@ function sodaLoginDebugSnapshot() {
 
 function readSodaCookieFromClient(opts) {
   opts = opts || {};
+  const shouldDiscover = opts.discover != null ? !!opts.discover : opts.allowGlobalScan !== false;
   const staticUserDataDirs = sodaKnownUserDataDirs({ discover: false }).filter(pathExistsDir);
-  const discoveredUserDataDirs = sodaKnownUserDataDirs({ discover: true }).filter(pathExistsDir);
+  const discoveredUserDataDirs = shouldDiscover ? sodaKnownUserDataDirs({ discover: true }).filter(pathExistsDir) : [];
   const userDataDirs = uniqueExistingOrder(staticUserDataDirs.concat(discoveredUserDataDirs));
   const cookieDbs = uniqueExistingOrder(
-    sodaCookieDbCandidates({ discover: false }).concat(sodaCookieDbCandidates({ discover: true }))
+    sodaCookieDbCandidates({ discover: false }).concat(shouldDiscover ? sodaCookieDbCandidates({ discover: true }) : [])
   ).filter(pathExistsFile);
   const picked = new Map();
   let lastError = '';
@@ -3874,6 +3954,137 @@ function refreshSodaCookieFromClient(force, opts) {
     sodaLoginInfoCache = null;
     sodaLoginInfoCacheAt = 0;
     sodaDeviceInfoCache = null;
+  }
+  return sodaCookie;
+}
+
+function applySodaLocalSyncResult(result) {
+  result = result || {};
+  if (result.lastLocalSync && typeof result.lastLocalSync === 'object') {
+    sodaLastLocalSync = {
+      checkedAt: Number(result.lastLocalSync.checkedAt) || Date.now(),
+      clientDir: String(result.lastLocalSync.clientDir || ''),
+      userDataDirs: Array.isArray(result.lastLocalSync.userDataDirs) ? result.lastLocalSync.userDataDirs : [],
+      cookieDbs: Array.isArray(result.lastLocalSync.cookieDbs) ? result.lastLocalSync.cookieDbs : [],
+      cookieRows: Number(result.lastLocalSync.cookieRows) || 0,
+      decryptFailures: Number(result.lastLocalSync.decryptFailures) || 0,
+      cookies: Number(result.lastLocalSync.cookies) || 0,
+      localStateCount: Number(result.lastLocalSync.localStateCount) || 0,
+      encryptedPrefixes: result.lastLocalSync.encryptedPrefixes && typeof result.lastLocalSync.encryptedPrefixes === 'object' ? result.lastLocalSync.encryptedPrefixes : {},
+      error: String(result.lastLocalSync.error || ''),
+    };
+  }
+  if (result.clientDir || sodaLastLocalSync.clientDir) {
+    sodaOfficialClientDirCache = { clientDir: String(result.clientDir || sodaLastLocalSync.clientDir || ''), scannedAt: Date.now() };
+    if (sodaOfficialClientDirCache.clientDir) writeSodaClientScanCache(sodaOfficialClientDirCache.clientDir);
+  }
+  if (result.userDataDiscoveryCache && typeof result.userDataDiscoveryCache === 'object') {
+    sodaUserDataDiscoveryCache = {
+      scannedAt: Number(result.userDataDiscoveryCache.scannedAt) || Date.now(),
+      dirs: Array.isArray(result.userDataDiscoveryCache.dirs) ? result.userDataDiscoveryCache.dirs : [],
+      cookieDbs: Array.isArray(result.userDataDiscoveryCache.cookieDbs) ? result.userDataDiscoveryCache.cookieDbs : [],
+    };
+  } else if (sodaLastLocalSync.userDataDirs.length || sodaLastLocalSync.cookieDbs.length) {
+    sodaUserDataDiscoveryCache = {
+      scannedAt: Date.now(),
+      dirs: sodaLastLocalSync.userDataDirs,
+      cookieDbs: sodaLastLocalSync.cookieDbs,
+    };
+  }
+  if (result.cookie && result.cookie !== sodaCookie) {
+    saveSodaCookie(result.cookie);
+    sodaLoginInfoCache = null;
+    sodaLoginInfoCacheAt = 0;
+    sodaDeviceInfoCache = null;
+  }
+}
+
+function runSodaCookieWorker(opts) {
+  if (sodaLocalSyncWorkerPromise) return sodaLocalSyncWorkerPromise;
+  sodaLocalSyncWorkerPromise = new Promise((resolve) => {
+    const startedAt = Date.now();
+    const child = spawn(process.execPath, [__filename], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        MINERADIO_SODA_COOKIE_WORKER: '1',
+      },
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sodaLocalSyncWorkerPromise = null;
+      resolve({
+        ...(result || {}),
+        workerDurationMs: Date.now() - startedAt,
+      });
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (e) {}
+      finish({
+        ok: false,
+        error: 'SODA_LOCAL_SYNC_TIMEOUT',
+        message: '汽水音乐本机登录读取超时，请确认客户端已打开并完成登录后重试',
+        stderr,
+      });
+    }, SODA_LOCAL_SYNC_WORKER_TIMEOUT_MS);
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk || '');
+      if (stdout.length > 4 * 1024 * 1024) stdout = stdout.slice(-4 * 1024 * 1024);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk || '');
+      if (stderr.length > 1024 * 1024) stderr = stderr.slice(-1024 * 1024);
+    });
+    child.on('error', err => {
+      finish({ ok: false, error: err.message || 'SODA_LOCAL_SYNC_WORKER_FAILED', stderr });
+    });
+    child.on('close', code => {
+      if (settled) return;
+      try {
+        const text = stdout.trim();
+        const parsed = JSON.parse(text);
+        finish({ ...parsed, exitCode: code, stderr });
+      } catch (e) {
+        finish({
+          ok: false,
+          exitCode: code,
+          error: e.message || 'SODA_LOCAL_SYNC_WORKER_BAD_OUTPUT',
+          stdout: stdout.slice(-2000),
+          stderr,
+        });
+      }
+    });
+    try {
+      child.stdin.end(JSON.stringify(opts || {}));
+    } catch (e) {
+      try { child.kill(); } catch (_) {}
+      finish({ ok: false, error: e.message || 'SODA_LOCAL_SYNC_WORKER_INPUT_FAILED' });
+    }
+  });
+  return sodaLocalSyncWorkerPromise;
+}
+
+async function refreshSodaCookieFromClientAsync(force, opts) {
+  if (!force || !sodaAutoSyncEnabled) return sodaCookie;
+  if (process.env.MINERADIO_DISABLE_SODA_COOKIE_WORKER === '1' || process.env.MINERADIO_SODA_COOKIE_WORKER === '1') {
+    return refreshSodaCookieFromClient(force, opts);
+  }
+  const result = await runSodaCookieWorker(opts);
+  if (result && result.ok) {
+    applySodaLocalSyncResult(result);
+  } else {
+    sodaLastLocalSync = {
+      ...sodaLastLocalSync,
+      checkedAt: Date.now(),
+      error: result && (result.message || result.error) || 'SODA_LOCAL_SYNC_FAILED',
+    };
   }
   return sodaCookie;
 }
@@ -4050,10 +4261,22 @@ async function sodaApiRequest(apiPath, params, opts) {
     applySodaBdmsSignature(u.toString(), headers);
   }
   const bdticketCtx = opts.security === false ? null : applySodaBdticketSignature(u.toString(), headers);
-  const response = await requestTextDetailed(u.toString(), { method: opts.method || (body ? 'POST' : 'GET'), headers }, body);
+  const response = await requestTextDetailed(u.toString(), { method: opts.method || (body ? 'POST' : 'GET'), headers, allowHttpError: !!opts.allowHttpError }, body);
   handleSodaBdticketResponse(bdticketCtx, u.toString(), response.headers);
   mergeSodaSetCookie(response.headers && response.headers['set-cookie']);
-  const json = response.text ? JSON.parse(response.text) : {};
+  let json = {};
+  try {
+    json = response.text ? JSON.parse(response.text) : {};
+  } catch (err) {
+    const parseErr = new Error('Invalid JSON from ' + apiPath);
+    parseErr.statusCode = response.statusCode;
+    parseErr.body = response.text || '';
+    parseErr.cause = err;
+    throw parseErr;
+  }
+  if (json && typeof json === 'object' && response.statusCode >= 400) {
+    json.httpStatusCode = response.statusCode;
+  }
   return json || {};
 }
 
@@ -4278,17 +4501,23 @@ function mapSodaPlaylist(pl) {
   pl = pl || {};
   const owner = pl.owner || pl.creator || {};
   const id = String(pl.id || pl.playlist_id || '');
+  const name = pl.title || pl.name || '';
+  const favorite = isProviderFavoritePlaylistName(name);
+  const readOnly = !favorite && isProviderReadonlyPlaylistName(name);
   return {
     provider: 'soda',
     source: 'soda',
     id,
-    name: pl.title || pl.name || '',
+    name,
     cover: sodaImageUrl(pl.url_cover || pl.cover || pl.cover_url),
     trackCount: Number(pl.count_tracks || pl.track_count || pl.song_count || 0) || 0,
     playCount: Number(pl.play_count || pl.play_count_show || 0) || 0,
     creator: owner.nickname || owner.name || 'Soda Music',
     subscribed: !!pl.subscribed,
-    specialType: 0,
+    favorite,
+    readOnly,
+    writable: !pl.subscribed && !readOnly,
+    specialType: favorite ? 5 : 0,
   };
 }
 
@@ -4381,12 +4610,39 @@ async function handleSodaSearch(keywords, limit) {
 
 async function getSodaLoginInfo(opts) {
   opts = opts || {};
-  if (opts.sync) refreshSodaCookieFromClient(true, { detectClient: false, allowGlobalScan: false });
+  if (opts.sync) await refreshSodaCookieFromClientAsync(true, { detectClient: false, allowGlobalScan: false });
   const now = Date.now();
-  const canUseCache = !opts.sync && sodaLoginInfoCache && sodaLoginInfoCache.cookie === sodaCookie && now - sodaLoginInfoCacheAt < SODA_LOGIN_INFO_CACHE_MS;
+  const canUseCache = !opts.sync
+    && sodaLoginInfoCache
+    && sodaLoginInfoCache.cookie === sodaCookie
+    && now - sodaLoginInfoCacheAt < SODA_LOGIN_INFO_CACHE_MS
+    && (!(sodaLoginInfoCache.info && sodaLoginInfoCache.info.quick) || opts.skipLocalSync);
   if (canUseCache) return { ...sodaLoginInfoCache.info };
   const cookieObj = sodaCookieObject();
   const hasSavedLoginTicket = !!sodaCookie && sodaCookieHasLoginTicket(cookieObj);
+  if (!opts.sync && opts.skipLocalSync && hasSavedLoginTicket) {
+    const quickInfo = {
+      provider: 'soda',
+      loggedIn: true,
+      nickname: '汽水音乐',
+      userId: '',
+      avatar: '',
+      vipType: 0,
+      vipLevel: 'none',
+      isVip: false,
+      isSvip: false,
+      vipLabel: '无VIP',
+      hasCookie: true,
+      clientDetected: sodaClientDetected(false),
+      quick: true,
+      stale: true,
+      profileUnavailable: true,
+      message: '已读取本机汽水音乐登录票据，稍后后台校验账号状态',
+    };
+    sodaLoginInfoCache = { cookie: sodaCookie, info: quickInfo };
+    sodaLoginInfoCacheAt = now;
+    return { ...quickInfo };
+  }
   if (!opts.sync && !hasSavedLoginTicket) {
     const fastInfo = {
       provider: 'soda',
@@ -4545,6 +4801,258 @@ async function handleSodaPlaylistTracks(id) {
     .filter(song => song.id && song.name);
   const playlist = mapSodaPlaylist(body.playlist || { id: pid });
   return { loggedIn: true, provider: 'soda', playlist, tracks };
+}
+
+async function requireSodaLoginInfoForWrite() {
+  const info = await getSodaLoginInfo({ sync: true });
+  if (!info.loggedIn || !info.userId) {
+    throw providerActionError('SODA_LOGIN_REQUIRED', '请先登录汽水音乐后再同步', 401);
+  }
+  return info;
+}
+
+function sodaSongActionId(input) {
+  input = input || {};
+  return String(input.sodaId || input.trackId || input.track_id || input.id || '').trim();
+}
+
+function sodaTrackMedia(id) {
+  return { id: String(id || '').trim(), type: 'track' };
+}
+
+function isSodaFavoritePlaylist(pl) {
+  if (isProviderFavoritePlaylistName(pl && pl.name)) return true;
+  const name = String(pl && pl.name || '').trim().toLowerCase();
+  return /我喜欢|我的喜欢|喜欢的音乐|liked|favorite|heart|love/i.test(name);
+}
+
+function sodaTrackMatchesId(song, id) {
+  const wanted = String(id || '').trim();
+  if (!wanted) return false;
+  return String(song && (song.sodaId || song.id || song.trackId || song.track_id) || '').trim() === wanted;
+}
+
+function sodaWriteOk(body) {
+  body = body && (body.body || body);
+  if (!body || typeof body !== 'object') return false;
+  if (Number(body.httpStatusCode || 0) >= 400) return false;
+  if (!Object.keys(body).length) return true;
+  const statusInfo = body.status_info || body.statusInfo || {};
+  const raw = body.code ?? body.status_code ?? body.statusCode ?? body.status ?? statusInfo.status_code ?? statusInfo.status;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const code = Number(raw);
+    if (Number.isFinite(code)) return code === 0 || code === 200;
+  }
+  if (body.success === true || body.ok === true || statusInfo.success === true || statusInfo.ok === true) return true;
+  const data = body.data && typeof body.data === 'object' ? body.data : {};
+  if (data.success === true || data.ok === true) return true;
+  return false;
+}
+
+function sodaWriteMessage(body, fallback) {
+  const statusCode = Number(body && body.httpStatusCode || 0) || 0;
+  const msg = sodaApiErrorMessage(body, fallback) || fallback || '';
+  if (statusCode >= 400) return 'HTTP ' + statusCode + (msg ? ': ' + msg : '');
+  return msg;
+}
+
+function sodaWriteAttemptMessage(attempts, fallback) {
+  const messages = (attempts || []).map(item => String(item && item.message || '').trim()).filter(Boolean);
+  if (messages.length && messages.every(msg => /^HTTP 404\b/i.test(msg))) return 'SODA_PLAYLIST_WRITE_UNSUPPORTED';
+  return messages.pop() || fallback || '';
+}
+
+function sodaShortErrorText(value, limit) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const max = Math.max(40, limit || 180);
+  return text.length > max ? text.slice(0, max) + '...' : text;
+}
+
+function sodaParseErrorBody(err) {
+  const text = err && err.body;
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function sodaAttemptErrorMessage(err, fallback) {
+  const body = sodaParseErrorBody(err);
+  const statusCode = Number(err && (err.statusCode || err.status) || 0) || 0;
+  const parsedMsg = body ? sodaWriteMessage(body, '') : '';
+  const rawMsg = sodaShortErrorText(err && err.body, 180);
+  const msg = parsedMsg || rawMsg || err && err.message || fallback || '';
+  if (statusCode >= 400 && !/^HTTP\s+\d+/i.test(msg)) return 'HTTP ' + statusCode + (msg ? ': ' + msg : '');
+  return msg;
+}
+
+async function sodaFavoritePlaylistWithTracks() {
+  const listResult = await handleSodaUserPlaylists();
+  const playlists = listResult.playlists || [];
+  const favorite = playlists.find(pl => isSodaFavoritePlaylist(pl)) || playlists[0] || null;
+  if (!favorite || !favorite.id) return { playlist: null, tracks: [] };
+  const tracksResult = await handleSodaPlaylistTracks(favorite.id);
+  return { playlist: favorite, tracks: tracksResult.tracks || [] };
+}
+
+async function confirmSodaPlaylistContainsTrack(pid, id, opts) {
+  opts = opts || {};
+  const waits = opts.slow ? [0, 700, 1600, 3200, 5600] : [0, 500, 1300, 2600];
+  for (const wait of waits) {
+    if (wait) await delay(wait);
+    try {
+      const detail = await handleSodaPlaylistTracks(pid);
+      const tracks = detail && detail.tracks || [];
+      if (tracks.some(song => sodaTrackMatchesId(song, id))) return true;
+    } catch (err) {
+      console.warn('[SodaPlaylistVerify]', pid, err.message);
+    }
+  }
+  return false;
+}
+
+async function confirmSodaFavoriteContainsTrack(id, opts) {
+  try {
+    const listResult = await handleSodaUserPlaylists();
+    const favorite = (listResult.playlists || []).find(pl => isSodaFavoritePlaylist(pl)) || null;
+    const verified = !!(favorite && favorite.id && await confirmSodaPlaylistContainsTrack(favorite.id, id, opts));
+    return { favorite, verified };
+  } catch (err) {
+    console.warn('[SodaLikeVerify] favorite playlist read failed:', err.message);
+    return { favorite: null, verified: false, error: err.message };
+  }
+}
+
+async function handleSodaSongLikeCheck(ids) {
+  await requireSodaLoginInfoForWrite();
+  const requested = (ids || []).map(id => String(id || '').trim()).filter(Boolean);
+  if (!requested.length) return { provider: 'soda', loggedIn: true, ids: [], liked: {} };
+  let tracks = [];
+  try {
+    const favorite = await sodaFavoritePlaylistWithTracks();
+    tracks = favorite.tracks || [];
+  } catch (err) {
+    console.warn('[SodaLikeCheck] favorite playlist read failed:', err.message);
+  }
+  const liked = {};
+  requested.forEach(id => {
+    liked[id] = tracks.some(song => sodaTrackMatchesId(song, id));
+  });
+  return { provider: 'soda', loggedIn: true, ids: requested, liked };
+}
+
+async function trySodaWriteAttempts(attempts) {
+  const results = [];
+  for (const attempt of attempts) {
+    try {
+      const body = await sodaApiRequest(attempt.path, attempt.params || {}, {
+        method: attempt.method || 'POST',
+        body: attempt.body || {},
+        allowHttpError: true,
+      });
+      const ok = sodaWriteOk(body);
+      results.push({ api: attempt.name || attempt.path, ok, statusCode: Number(body && body.httpStatusCode || 0) || 0, message: sodaWriteMessage(body), body });
+      if (ok) return { success: true, body, attempts: results };
+    } catch (err) {
+      results.push({ api: attempt.name || attempt.path, ok: false, statusCode: Number(err && (err.statusCode || err.status) || 0) || 0, message: sodaAttemptErrorMessage(err, 'SODA_WRITE_FAILED'), body: sodaParseErrorBody(err) || undefined });
+    }
+  }
+  return { success: false, attempts: results, error: sodaWriteAttemptMessage(results, 'SODA_WRITE_FAILED') };
+}
+
+async function handleSodaSongLike(input, like) {
+  await requireSodaLoginInfoForWrite();
+  const id = sodaSongActionId(input);
+  if (!id) throw providerActionError('SODA_MISSING_SONG_ID', '缺少汽水音乐歌曲 ID', 400);
+  const nextLike = like !== false && String(like) !== 'false' && String(like) !== '0';
+  const media = [sodaTrackMedia(id)];
+  const attempts = nextLike ? [
+    { name: 'CollectMediaList_pc', path: '/luna/pc/me/collection/media', method: 'POST', body: { scene: '', media } },
+    { name: 'CollectMediaList', path: '/luna/me/collection/media', method: 'POST', body: { scene: '', media } },
+    { name: 'CollectMediaList_pc_action_1', path: '/luna/pc/me/collection/media', method: 'POST', body: { scene: '', collect_action: 1, media } },
+    { name: 'CollectMediaList_action', path: '/luna/pc/me/collection/media', method: 'POST', body: { scene: '', collect_action: 4, media } },
+    { name: 'CollectMediaList_slash', path: '/luna/pc/me/collection/media/', method: 'POST', body: { scene: '', media } },
+  ] : [
+    { name: 'DeleteCollectedMediaList_pc', path: '/luna/pc/me/collection/media/delete', method: 'POST', body: { media } },
+    { name: 'DeleteCollectedMediaList', path: '/luna/me/collection/media/delete', method: 'POST', body: { media } },
+    { name: 'DeleteCollectedMediaList_slash', path: '/luna/pc/me/collection/media/delete/', method: 'POST', body: { media } },
+  ];
+  const result = await trySodaWriteAttempts(attempts);
+  if (result.success) {
+    let verified = !nextLike;
+    if (nextLike) {
+      const confirm = await confirmSodaFavoriteContainsTrack(id);
+      verified = confirm.verified;
+    }
+    return { provider: 'soda', loggedIn: true, success: true, verified, pendingVerify: nextLike && !verified, id, liked: nextLike, body: result.body, attempts: result.attempts };
+  }
+  if (nextLike) {
+    const confirm = await confirmSodaFavoriteContainsTrack(id, { slow: true });
+    if (confirm.verified) {
+      return { provider: 'soda', loggedIn: true, success: true, verified: true, recoveredByVerify: true, id, liked: true, attempts: result.attempts };
+    }
+  }
+  return { provider: 'soda', loggedIn: true, success: false, id, liked: !nextLike, error: result.error || 'SODA_LIKE_WRITE_FAILED', attempts: result.attempts };
+}
+
+async function handleSodaPlaylistAddSong(pid, input) {
+  await requireSodaLoginInfoForWrite();
+  const playlistId = String(pid || '').trim();
+  const id = sodaSongActionId(input);
+  if (!playlistId || !id) {
+    return { provider: 'soda', loggedIn: true, success: false, error: 'Missing playlist id or song id', attempts: [] };
+  }
+  let targetPlaylist = null;
+  try {
+    const listResult = await handleSodaUserPlaylists();
+    targetPlaylist = (listResult.playlists || []).find(pl => String(pl.id || '') === playlistId) || null;
+  } catch (err) {
+    console.warn('[SodaPlaylistAdd] playlist lookup failed:', err.message);
+  }
+  if (targetPlaylist && isSodaFavoritePlaylist(targetPlaylist)) {
+    const liked = await handleSodaSongLike({ id }, true);
+    return {
+      provider: 'soda',
+      loggedIn: true,
+      success: !!(liked && liked.success),
+      pid: playlistId,
+      id,
+      liked: true,
+      favoriteFallback: true,
+      verified: liked && liked.verified,
+      pendingVerify: !!(liked && liked.pendingVerify),
+      error: liked && liked.success ? '' : (liked && liked.error || 'SODA_PLAYLIST_WRITE_UNSUPPORTED'),
+      attempts: liked && liked.attempts || [],
+      body: liked && liked.body,
+    };
+  }
+  if (targetPlaylist && targetPlaylist.readOnly) {
+    return { provider: 'soda', loggedIn: true, success: false, pid: playlistId, id, error: 'SODA_PLAYLIST_READONLY', attempts: [] };
+  }
+  const media = [sodaTrackMedia(id)];
+  const attempts = [
+    { name: 'MAppendPlaylistMedia_pc', path: '/luna/pc/me/playlist/media/append', method: 'POST', body: { playlist_id: playlistId, media } },
+    { name: 'MAppendPlaylistMedia', path: '/luna/me/playlist/media/append', method: 'POST', body: { playlist_id: playlistId, media } },
+    { name: 'MAppendPlaylistMedia_pc_scene', path: '/luna/pc/me/playlist/media/append', method: 'POST', body: { playlist_id: playlistId, scene: '', media } },
+    { name: 'MAppendPlaylistMedia_slash', path: '/luna/pc/me/playlist/media/append/', method: 'POST', body: { playlist_id: playlistId, media } },
+    { name: 'MAppendPlaylistTracks', path: '/luna/me/playlist/track/append', method: 'POST', body: { playlist_id: playlistId, track_ids: [id] } },
+  ];
+  const result = await trySodaWriteAttempts(attempts);
+  if (result.success) {
+    const verified = await confirmSodaPlaylistContainsTrack(playlistId, id);
+    return { provider: 'soda', loggedIn: true, success: true, verified, pendingVerify: !verified, pid: playlistId, id, body: result.body, attempts: result.attempts };
+  }
+  const recovered = await confirmSodaPlaylistContainsTrack(playlistId, id, { slow: true });
+  if (recovered) {
+    return { provider: 'soda', loggedIn: true, success: true, verified: true, recoveredByVerify: true, pid: playlistId, id, attempts: result.attempts };
+  }
+  return {
+    provider: 'soda',
+    loggedIn: true,
+    success: false,
+    pid: playlistId,
+    id,
+    error: result.error === 'SODA_WRITE_FAILED' ? 'SODA_PLAYLIST_WRITE_UNSUPPORTED' : (result.error || 'SODA_PLAYLIST_WRITE_UNSUPPORTED'),
+    attempts: result.attempts,
+  };
 }
 
 function findSodaMediaUrl(value, depth) {
@@ -5035,6 +5543,7 @@ async function handleSodaDiscoverHome() {
   }
   let playlists = [];
   let dailySongs = [];
+  let favoriteSongs = [];
   let newSongs = [];
   try {
     const listResult = await handleSodaUserPlaylists();
@@ -5042,14 +5551,15 @@ async function handleSodaDiscoverHome() {
     const favorite = playlists[0] || null;
     if (favorite && favorite.id) {
       const tracksResult = await handleSodaPlaylistTracks(favorite.id);
-      dailySongs = (tracksResult.tracks || []).slice(0, 30);
+      favoriteSongs = (tracksResult.tracks || []).slice(0, 60);
     }
     try { newSongs = await handleSodaSearch('\u65b0\u6b4c', 24); }
     catch (e) { newSongs = []; }
   } catch (e) {
     console.warn('[SodaDiscoverHome]', e && e.message || e);
   }
-  const radarSongs = shuffledSample(mergeDiscoverLists([dailySongs, newSongs], 60), 30);
+  dailySongs = stableDailySample(mergeDiscoverLists([newSongs, favoriteSongs], 80), 30, 'soda-daily:' + (info.userId || 'guest'));
+  const radarSongs = shuffledSample(mergeDiscoverLists([dailySongs, favoriteSongs, newSongs], 60), 30);
   return {
     provider: 'soda',
     loggedIn,
@@ -5059,9 +5569,9 @@ async function handleSodaDiscoverHome() {
     podcasts: [],
     radarSongs,
     newSongs,
-    heartSongs: radarSongs,
+    heartSongs: favoriteSongs.length ? favoriteSongs.slice(0, 30) : radarSongs,
     similarSongs: newSongs,
-    recommendationSongs: shuffledSample(mergeDiscoverLists([dailySongs, newSongs, radarSongs], 40), 5),
+    recommendationSongs: shuffledSample(mergeDiscoverLists([dailySongs, favoriteSongs, newSongs, radarSongs], 40), 5),
     mode: 'member',
     updatedAt: Date.now(),
   };
@@ -5738,12 +6248,14 @@ function normalizeQQProfile(body, cookieObj) {
   };
 }
 
-async function getQQLoginInfo() {
+async function getQQLoginInfo(opts) {
+  opts = opts || {};
   const cookieObj = qqCookieObject();
   const uin = qqCookieUin(cookieObj);
   const musicKey = qqCookieMusicKey(cookieObj);
   if (!uin || !musicKey) return { provider: 'qq', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasCookie: !!qqCookie };
   const fallback = normalizeQQProfile(null, cookieObj);
+  if (opts.quick) return { ...fallback, quick: true, profileUnavailable: true };
   try {
     const u = new URL('https://c.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg');
     u.searchParams.set('cid', '205360838');
@@ -5811,19 +6323,32 @@ function audioContentTypeForUrl(audioUrl, upstreamType) {
 
 function mapQQPlaylist(pl, kind) {
   pl = pl || {};
-  const id = pl.dissid || pl.tid || pl.dirid || pl.id || pl.diss_id;
+  const tid = pl.tid || pl.dirid || pl.dir_id || '';
+  const id = pl.dissid || tid || pl.id || pl.diss_id;
+  const dissid = pl.dissid || pl.diss_id || pl.disstid || pl.id || '';
+  const dirid = pl.dirid || pl.dir_id || tid || '';
   const creator = pl.creator || {};
+  const name = pl.diss_name || pl.dissname || pl.name || pl.title || '';
+  const favorite = isQQFavoritePlaylist({ ...pl, name, dirid, dissid });
+  const readOnly = !favorite && isProviderReadonlyPlaylistName(name);
   return {
     provider: 'qq',
     source: 'qq',
     id: id ? String(id) : '',
-    name: pl.diss_name || pl.dissname || pl.name || pl.title || '',
+    dissid: dissid ? String(dissid) : '',
+    dirid: dirid ? String(dirid) : '',
+    tid: tid ? String(tid) : '',
+    writeId: (dirid || id) ? String(dirid || id) : '',
+    name,
     cover: pl.diss_cover || pl.imgurl || pl.logo || pl.picurl || pl.cover || '',
     trackCount: pl.song_cnt || pl.songnum || pl.total_song_num || pl.song_count || pl.song_count_all || 0,
     playCount: pl.listen_num || pl.listennum || pl.visitnum || pl.play_count || 0,
     creator: pl.hostname || pl.nick || creator.name || creator.nick || pl.creator || 'QQ 音乐',
     subscribed: kind === 'collect',
-    specialType: 0,
+    favorite,
+    readOnly,
+    writable: kind !== 'collect' && !readOnly,
+    specialType: favorite ? 5 : 0,
   };
 }
 
@@ -5843,6 +6368,7 @@ function mapQQPlaylistTrack(raw) {
     type: 'qq',
     id: mid || String(track.id || track.songid || raw.id || raw.songid || ''),
     qqId: track.id || track.songid || track.songId || raw.id || raw.songid || raw.songId || '',
+    songType: qqSongActionType({ songType: track.songType ?? track.songtype ?? track.type ?? raw.songType ?? raw.songtype ?? raw.type }),
     mid,
     songmid: mid,
     mediaMid: (track.file && track.file.media_mid) || track.strMediaMid || track.media_mid || raw.strMediaMid || '',
@@ -5931,6 +6457,494 @@ async function handleQQPlaylistTracks(id) {
   return { loggedIn: true, provider: 'qq', playlist, tracks };
 }
 
+function providerActionError(errorCode, message, statusCode) {
+  const err = new Error(message || errorCode || 'PROVIDER_ACTION_FAILED');
+  err.errorCode = errorCode || 'PROVIDER_ACTION_FAILED';
+  err.statusCode = statusCode || 500;
+  return err;
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function requireQQLoginInfoForWrite() {
+  const info = await getQQLoginInfo();
+  if (!info.loggedIn || !info.userId) {
+    throw providerActionError('QQ_LOGIN_REQUIRED', '请先登录 QQ 音乐后再同步', 401);
+  }
+  return info;
+}
+
+function qqSongActionIdentity(input) {
+  input = input || {};
+  const rawMid = String(input.mid || input.songmid || input.songMid || '').trim();
+  const rawId = String(input.qqId || input.songId || input.songid || input.id || '').trim();
+  const idLooksMid = rawId && !/^\d+$/.test(rawId);
+  const mid = rawMid || (idLooksMid ? rawId : '');
+  const qqId = /^\d+$/.test(rawId) ? rawId : '';
+  return { id: mid || qqId, mid, songmid: mid, qqId, songType: qqSongActionType(input) };
+}
+
+function qqSongActionType(input) {
+  input = input || {};
+  const keys = ['songType', 'songtype', 'qqSongType', 'qqType'];
+  for (const key of keys) {
+    const value = input[key];
+    if (value === undefined || value === null || value === '') continue;
+    const text = String(value).trim();
+    if (!/^-?\d+$/.test(text)) continue;
+    const type = Number(text);
+    if (Number.isFinite(type) && type >= 0) return type;
+  }
+  const rawType = input.type;
+  if (rawType !== undefined && rawType !== null && String(rawType).trim() !== '' && /^-?\d+$/.test(String(rawType).trim())) {
+    const type = Number(rawType);
+    if (Number.isFinite(type) && type >= 0) return type;
+  }
+  return 0;
+}
+
+function qqSongMatchesIdentity(song, identity) {
+  song = song || {};
+  identity = identity || {};
+  const mid = String(song.mid || song.songmid || song.songMid || song.id || '').trim();
+  const numericId = String(song.qqId || song.songId || song.songid || '').trim();
+  return !!(
+    (identity.mid && mid && identity.mid === mid) ||
+    (identity.qqId && numericId && identity.qqId === numericId) ||
+    (identity.id && (identity.id === mid || identity.id === numericId))
+  );
+}
+
+function qqWriteCommonParams(info) {
+  return {
+    g_tk: qqCSRFToken(true) || 5381,
+    loginUin: info.userId,
+    hostUin: 0,
+    format: 'json',
+    inCharset: 'utf8',
+    outCharset: 'utf-8',
+    notice: 0,
+    platform: 'yqq.json',
+    needNewCode: 0,
+  };
+}
+
+function qqWriteOk(body) {
+  body = body && (body.body || body);
+  const data = body && (body.data || body.Data) || {};
+  const raw = body && (body.code ?? body.retcode ?? body.ret ?? body.result ?? data.code ?? data.retcode);
+  if (raw === undefined || raw === null || raw === '') return !(body && (body.error || body.message || body.msg));
+  const code = Number(raw);
+  return code === 0 || code === 200;
+}
+
+function qqWriteMessage(body, fallback) {
+  body = body && (body.body || body);
+  const data = body && (body.data || body.Data) || {};
+  return (body && (body.message || body.msg || body.error)) || data.msg || data.message || fallback || '';
+}
+
+function qqWriteAttemptMessage(attempts, fallback) {
+  const messages = (attempts || []).map(item => String(item && item.message || '').trim()).filter(Boolean);
+  if (!messages.length) return fallback || '';
+  const useful = messages.filter(msg => !/^HTTP 404\b/i.test(msg));
+  return useful.pop() || messages.pop() || fallback || '';
+}
+
+function providerAttemptErrorMessage(err, fallback) {
+  return err && (err.errorCode || err.message) || fallback || '';
+}
+
+function qqWriteDirId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^\d+$/.test(text)) {
+    const num = Number(text);
+    if (Number.isSafeInteger(num)) return num;
+  }
+  return text;
+}
+
+function qqWriteSongTypeAttempts(input) {
+  const primary = qqSongActionType(input);
+  const out = [];
+  [primary, 0, 13].forEach(value => {
+    const type = Number(value);
+    if (Number.isFinite(type) && type >= 0 && !out.includes(type)) out.push(type);
+  });
+  return out;
+}
+
+async function qqWriteSongInfo(identity, songType) {
+  identity = identity || {};
+  let songId = String(identity.qqId || '').trim();
+  let resolvedType = Number.isFinite(Number(songType)) ? Number(songType) : qqSongActionType(identity);
+  if ((!songId || !Number.isFinite(Number(resolvedType))) && identity.mid) {
+    try {
+      const detail = await qqSongRawDetail(identity.mid);
+      if (detail) {
+        if (!songId && detail.id != null) songId = String(detail.id);
+        if (!Number.isFinite(Number(resolvedType)) && detail.type != null) resolvedType = Number(detail.type);
+      }
+    } catch (err) {
+      console.warn('[QQPlaylistDetailWrite] song detail resolve failed:', err.message);
+    }
+  }
+  if (!songId || !/^\d+$/.test(songId)) {
+    throw providerActionError('QQ_MISSING_NUMERIC_SONG_ID', 'Missing QQ numeric song id', 400);
+  }
+  if (!Number.isFinite(Number(resolvedType)) || Number(resolvedType) < 0) resolvedType = 0;
+  return { songId: Number(songId), songType: Number(resolvedType) };
+}
+
+async function qqPlaylistDetailWriteSong(dirId, identity, op, songType) {
+  const info = await qqWriteSongInfo(identity, songType);
+  const payload = {
+    comm: qqMusicComm(true),
+    req_0: {
+      module: 'music.musicasset.PlaylistDetailWrite',
+      method: op === 'del' ? 'DelSonglist' : 'AddSonglist',
+      param: {
+        dirId: qqWriteDirId(dirId),
+        v_songInfo: [{ songType: info.songType, songId: info.songId }],
+      },
+    },
+  };
+  const json = await qqMusicRequest(payload, { cookie: true });
+  return json && (json.req_0 || json.req0) || json;
+}
+
+async function resolveQQPlaylistWriteId(pid, explicitWriteId) {
+  const direct = String(explicitWriteId || '').trim();
+  if (direct) return direct;
+  const target = String(pid || '').trim();
+  if (!target) return '';
+  try {
+    const listResult = await handleQQUserPlaylists();
+    const playlists = listResult.playlists || [];
+    const hit = playlists.find(pl => {
+      return String(pl.id || '') === target ||
+        String(pl.dissid || '') === target ||
+        String(pl.dirid || '') === target ||
+        String(pl.tid || '') === target ||
+        String(pl.writeId || '') === target;
+    });
+    if (hit && hit.writeId) return String(hit.writeId);
+    if (hit && hit.dirid) return String(hit.dirid);
+  } catch (err) {
+    console.warn('[QQPlaylistWrite] resolve dirid failed:', err.message);
+  }
+  return target;
+}
+
+function pushQQWriteIdCandidate(candidates, value) {
+  const text = String(value || '').trim();
+  if (!text || candidates.includes(text)) return;
+  candidates.push(text);
+}
+
+function qqPlaylistWriteIdCandidates(playlistId, explicitWriteId, targetPlaylist, resolvedWriteId) {
+  const candidates = [];
+  pushQQWriteIdCandidate(candidates, explicitWriteId);
+  if (targetPlaylist) {
+    pushQQWriteIdCandidate(candidates, targetPlaylist.dirid);
+    pushQQWriteIdCandidate(candidates, targetPlaylist.tid);
+    pushQQWriteIdCandidate(candidates, targetPlaylist.writeId);
+  }
+  pushQQWriteIdCandidate(candidates, resolvedWriteId);
+  if (targetPlaylist) {
+    pushQQWriteIdCandidate(candidates, targetPlaylist.id);
+    pushQQWriteIdCandidate(candidates, targetPlaylist.dissid);
+  }
+  pushQQWriteIdCandidate(candidates, playlistId);
+  return candidates;
+}
+
+async function handleQQPlaylistWriteSong(pid, input, op) {
+  const info = await requireQQLoginInfoForWrite();
+  const playlistId = String(pid || '').trim();
+  const identity = qqSongActionIdentity(input);
+  if (!playlistId || !identity.id) {
+    return { provider: 'qq', loggedIn: true, success: false, error: 'Missing playlist id or song id', attempts: [] };
+  }
+  const attempts = [];
+  let targetPlaylist = null;
+  try {
+    const listResult = await handleQQUserPlaylists();
+    targetPlaylist = (listResult.playlists || []).find(pl => {
+      return String(pl.id || '') === playlistId ||
+        String(pl.dissid || '') === playlistId ||
+        String(pl.dirid || '') === playlistId ||
+        String(pl.tid || '') === playlistId ||
+        String(pl.writeId || '') === playlistId;
+    }) || null;
+  } catch (err) {
+    console.warn('[QQPlaylistWrite] playlist lookup failed:', err.message);
+  }
+  if (targetPlaylist && isQQFavoritePlaylist(targetPlaylist)) {
+    const songTypes = qqWriteSongTypeAttempts(input || identity);
+    for (const songType of songTypes) {
+      try {
+        const body = await qqPlaylistDetailWriteSong(201, identity, op, songType);
+        const ok = qqRpcBlockOk(body);
+        attempts.push({ api: op === 'del' ? 'PlaylistDetailWrite_DelSonglist_201' : 'PlaylistDetailWrite_AddSonglist_201', ok, code: qqRpcBlockCode(body), songType, message: qqRpcBlockMessage(body), body });
+        if (ok) {
+          if (op === 'add') {
+            const verified = await confirmQQPlaylistContainsSong(targetPlaylist.id || playlistId, identity);
+            if (!verified) {
+              return { provider: 'qq', loggedIn: true, success: true, pid: playlistId, id: identity.id, verified: false, pendingVerify: true, liked: true, favoriteFallback: true, body, attempts };
+            }
+          }
+          return { provider: 'qq', loggedIn: true, success: true, verified: op === 'add', pid: playlistId, id: identity.id, liked: op !== 'del', favoriteFallback: true, body, attempts };
+        }
+      } catch (err) {
+        attempts.push({ api: op === 'del' ? 'PlaylistDetailWrite_DelSonglist_201' : 'PlaylistDetailWrite_AddSonglist_201', ok: false, songType, message: providerAttemptErrorMessage(err) });
+      }
+    }
+    try {
+      const body = await qqFavoriteSongWrite(identity, op !== 'del', info);
+      const ok = qqWriteOk(body);
+      attempts.push({ api: op === 'del' ? 'fcg_del_song_from_fav' : 'fcg_add_song2fav', ok, code: normalizeApiCode(body), message: qqWriteMessage(body), body });
+      if (ok) {
+        if (op === 'add') {
+          const verified = await confirmQQPlaylistContainsSong(targetPlaylist.id || playlistId, identity);
+          if (!verified) {
+            return { provider: 'qq', loggedIn: true, success: true, pid: playlistId, id: identity.id, verified: false, pendingVerify: true, liked: true, favoriteFallback: true, body, attempts };
+          }
+        }
+        return { provider: 'qq', loggedIn: true, success: true, verified: op === 'add', pid: playlistId, id: identity.id, liked: op !== 'del', favoriteFallback: true, body, attempts };
+      }
+    } catch (err) {
+      attempts.push({ api: op === 'del' ? 'fcg_del_song_from_fav' : 'fcg_add_song2fav', ok: false, message: err.message });
+    }
+    return {
+      provider: 'qq',
+      loggedIn: true,
+      success: false,
+      pid: playlistId,
+      id: identity.id,
+      error: qqWriteAttemptMessage(attempts, 'QQ_LIKE_WRITE_FAILED'),
+      attempts,
+    };
+  }
+  if (targetPlaylist && targetPlaylist.readOnly) {
+    return { provider: 'qq', loggedIn: true, success: false, pid: playlistId, id: identity.id, error: 'QQ_PLAYLIST_READONLY', attempts: [] };
+  }
+  const explicitWriteId = input && (input.writeId || input.dirid);
+  const resolvedWriteId = String(targetPlaylist && (targetPlaylist.dirid || targetPlaylist.tid || targetPlaylist.writeId) || '')
+    || await resolveQQPlaylistWriteId(playlistId, explicitWriteId);
+  const writeIds = qqPlaylistWriteIdCandidates(playlistId, explicitWriteId, targetPlaylist, resolvedWriteId);
+  const songTypes = qqWriteSongTypeAttempts(input || identity);
+  for (const writeId of writeIds) {
+    for (const songType of songTypes) {
+      try {
+        const body = await qqPlaylistDetailWriteSong(writeId, identity, op, songType);
+        const ok = qqRpcBlockOk(body);
+        attempts.push({ api: op === 'del' ? 'PlaylistDetailWrite_DelSonglist' : 'PlaylistDetailWrite_AddSonglist', ok, code: qqRpcBlockCode(body), writeId, songType, message: qqRpcBlockMessage(body), body });
+        if (ok) {
+          if (op === 'add') {
+            const verified = await confirmQQPlaylistContainsSong(playlistId, identity);
+            if (!verified) {
+              return { provider: 'qq', loggedIn: true, success: true, pid: playlistId, writeId, id: identity.id, verified: false, pendingVerify: true, body, attempts };
+            }
+          }
+          return { provider: 'qq', loggedIn: true, success: true, verified: op === 'add', pid: playlistId, writeId, id: identity.id, body, attempts };
+        }
+      } catch (err) {
+        attempts.push({ api: op === 'del' ? 'PlaylistDetailWrite_DelSonglist' : 'PlaylistDetailWrite_AddSonglist', ok: false, writeId, songType, message: providerAttemptErrorMessage(err) });
+      }
+    }
+  }
+  const endpoint = op === 'del'
+    ? 'https://c.y.qq.com/qzone/fcg-bin/fcg_music_delbatchsong.fcg'
+    : 'https://c.y.qq.com/qzone/fcg-bin/fcg_music_add2songdir.fcg';
+  for (const writeId of writeIds) {
+    const params = {
+      ...qqWriteCommonParams(info),
+      uin: info.userId,
+      dirid: writeId,
+      disstid: playlistId,
+      songmid: identity.mid || identity.id,
+      songmidlist: identity.mid || identity.id,
+      songid: identity.qqId || '',
+      songlist: identity.mid || identity.qqId || identity.id,
+      typelist: 13,
+      formsender: 4,
+      source: 153,
+      r2: 0,
+      r3: 1,
+    };
+    try {
+      const body = await qqGetJSON(endpoint, params, {
+        headers: { Referer: 'https://y.qq.com/n/ryqq/profile/like/song' },
+      });
+      const ok = qqWriteOk(body);
+      attempts.push({ api: op === 'del' ? 'fcg_music_delbatchsong' : 'fcg_music_add2songdir', ok, code: normalizeApiCode(body), writeId, message: qqWriteMessage(body), body });
+      if (ok) {
+        if (op === 'add') {
+          const verified = await confirmQQPlaylistContainsSong(playlistId, identity);
+          if (!verified) {
+            return { provider: 'qq', loggedIn: true, success: true, pid: playlistId, writeId, id: identity.id, verified: false, pendingVerify: true, body, attempts };
+          }
+        }
+        return { provider: 'qq', loggedIn: true, success: true, verified: op === 'add', pid: playlistId, writeId, id: identity.id, body, attempts };
+      }
+    } catch (err) {
+      attempts.push({ api: op === 'del' ? 'fcg_music_delbatchsong' : 'fcg_music_add2songdir', ok: false, writeId, message: err.message });
+    }
+  }
+  return {
+    provider: 'qq',
+    loggedIn: true,
+    success: false,
+    pid: playlistId,
+    writeId: writeIds[0] || '',
+    id: identity.id,
+    error: qqWriteAttemptMessage(attempts, 'QQ_PLAYLIST_WRITE_FAILED'),
+    attempts,
+  };
+}
+
+async function qqFavoriteSongWrite(identity, nextLike, info) {
+  const endpoint = nextLike
+    ? 'https://c.y.qq.com/fav/fcgi-bin/fcg_add_song2fav.fcg'
+    : 'https://c.y.qq.com/fav/fcgi-bin/fcg_del_song_from_fav.fcg';
+  const params = {
+    ...qqWriteCommonParams(info),
+    uin: info.userId,
+    songid: identity.qqId || '',
+    songmid: identity.mid || identity.id,
+    songtype: 13,
+  };
+  const body = await qqGetJSON(endpoint, params, {
+    headers: { Referer: 'https://y.qq.com/n/ryqq/profile/like/song' },
+  });
+  return body;
+}
+
+async function qqFavoritePlaylistWithTracks() {
+  const listResult = await handleQQUserPlaylists();
+  const playlists = listResult.playlists || [];
+  const favorite = playlists.find(pl => isQQFavoritePlaylist(pl)) || null;
+  if (!favorite || !favorite.id) return { playlist: null, tracks: [] };
+  const tracksResult = await handleQQPlaylistTracks(favorite.id);
+  return { playlist: favorite, tracks: tracksResult.tracks || [] };
+}
+
+async function confirmQQPlaylistContainsSong(pid, identity) {
+  const waits = [450, 1100, 2200];
+  for (const wait of waits) {
+    if (wait) await delay(wait);
+    try {
+      const detail = await handleQQPlaylistTracks(pid);
+      const tracks = detail && detail.tracks || [];
+      if (tracks.some(song => qqSongMatchesIdentity(song, identity))) return true;
+    } catch (err) {
+      console.warn('[QQPlaylistVerify]', pid, err.message);
+    }
+  }
+  return false;
+}
+
+async function handleQQSongLikeCheck(ids) {
+  await requireQQLoginInfoForWrite();
+  const requested = (ids || []).map(id => ({ id: String(id), identity: qqSongActionIdentity({ id }) })).filter(item => item.id);
+  if (!requested.length) return { provider: 'qq', loggedIn: true, ids: [], liked: {} };
+  let tracks = [];
+  try {
+    const favorite = await qqFavoritePlaylistWithTracks();
+    tracks = favorite.tracks || [];
+  } catch (err) {
+    console.warn('[QQLikeCheck] favorite playlist read failed:', err.message);
+  }
+  const liked = {};
+  requested.forEach(item => {
+    liked[item.id] = tracks.some(song => qqSongMatchesIdentity(song, item.identity));
+  });
+  return { provider: 'qq', loggedIn: true, ids: requested.map(item => item.id), liked };
+}
+
+async function handleQQSongLike(input, like) {
+  const info = await requireQQLoginInfoForWrite();
+  const identity = qqSongActionIdentity(input);
+  if (!identity.id) throw providerActionError('QQ_MISSING_SONG_ID', '缺少 QQ 音乐歌曲 ID', 400);
+  const nextLike = like !== false && String(like) !== 'false' && String(like) !== '0';
+  const attempts = [];
+  try {
+    const favorite = await qqFavoritePlaylistWithTracks();
+    if (favorite.playlist && favorite.playlist.id) {
+      const playlistResult = await handleQQPlaylistWriteSong(favorite.playlist.id, identity, nextLike ? 'add' : 'del');
+      attempts.push(...(playlistResult.attempts || []));
+      if (playlistResult.success) {
+        return { provider: 'qq', loggedIn: true, success: true, id: identity.id, liked: nextLike, attempts };
+      }
+    }
+  } catch (err) {
+    attempts.push({ api: 'favorite_playlist', ok: false, message: err.message });
+  }
+  if (!attempts.some(item => String(item && item.api || '').indexOf('PlaylistDetailWrite') >= 0)) {
+    const songTypes = qqWriteSongTypeAttempts(input || identity);
+    for (const songType of songTypes) {
+      try {
+        const body = await qqPlaylistDetailWriteSong(201, identity, nextLike ? 'add' : 'del', songType);
+        const ok = qqRpcBlockOk(body);
+        attempts.push({ api: nextLike ? 'PlaylistDetailWrite_AddSonglist_201' : 'PlaylistDetailWrite_DelSonglist_201', ok, code: qqRpcBlockCode(body), songType, message: qqRpcBlockMessage(body), body });
+        if (ok) {
+          if (nextLike) {
+            let verified = false;
+            try {
+              const favorite = await qqFavoritePlaylistWithTracks();
+              verified = !!(favorite.playlist && favorite.playlist.id && (favorite.tracks || []).some(song => qqSongMatchesIdentity(song, identity)));
+            } catch (verifyErr) {
+              attempts.push({ api: 'favorite_verify', ok: false, message: verifyErr.message });
+            }
+            if (!verified) {
+              return { provider: 'qq', loggedIn: true, success: true, id: identity.id, liked: nextLike, verified: false, pendingVerify: true, body, attempts };
+            }
+          }
+          return { provider: 'qq', loggedIn: true, success: true, verified: nextLike, id: identity.id, liked: nextLike, body, attempts };
+        }
+      } catch (err) {
+        attempts.push({ api: nextLike ? 'PlaylistDetailWrite_AddSonglist_201' : 'PlaylistDetailWrite_DelSonglist_201', ok: false, songType, message: providerAttemptErrorMessage(err) });
+      }
+    }
+  }
+  try {
+    const body = await qqFavoriteSongWrite(identity, nextLike, info);
+    const ok = qqWriteOk(body);
+    attempts.push({ api: nextLike ? 'fcg_add_song2fav' : 'fcg_del_song_from_fav', ok, code: normalizeApiCode(body), message: qqWriteMessage(body), body });
+    if (ok) {
+      if (nextLike) {
+        let verified = false;
+        try {
+          const listResult = await handleQQUserPlaylists();
+          const favorite = (listResult.playlists || []).find(pl => isQQFavoritePlaylist(pl)) || null;
+          verified = !!(favorite && favorite.id && await confirmQQPlaylistContainsSong(favorite.id, identity));
+        } catch (verifyErr) {
+          attempts.push({ api: 'favorite_verify', ok: false, message: verifyErr.message });
+        }
+        if (!verified) {
+          return { provider: 'qq', loggedIn: true, success: true, id: identity.id, liked: nextLike, verified: false, pendingVerify: true, body, attempts };
+        }
+      }
+      return { provider: 'qq', loggedIn: true, success: true, verified: nextLike, id: identity.id, liked: nextLike, body, attempts };
+    }
+  } catch (err) {
+    attempts.push({ api: nextLike ? 'fcg_add_song2fav' : 'fcg_del_song_from_fav', ok: false, message: err.message });
+  }
+  return {
+    provider: 'qq',
+    loggedIn: true,
+    success: false,
+    id: identity.id,
+    liked: !nextLike,
+    error: qqWriteAttemptMessage(attempts, 'QQ_LIKE_WRITE_FAILED'),
+    attempts,
+  };
+}
+
 function qqAlbumCover(albumMid, size) {
   if (!albumMid) return '';
   const px = size || 300;
@@ -5962,6 +6976,7 @@ function mapQQSmartSong(item) {
     type: 'qq',
     id: mid,
     qqId: item.id || item.docid || '',
+    songType: qqSongActionType({ songType: item.songType ?? item.songtype ?? item.type }),
     mid,
     songmid: mid,
     name: item.name || item.title || '',
@@ -6023,6 +7038,7 @@ function mapQQTrack(track, fallback) {
     type: 'qq',
     id: mid,
     qqId: track.id || fallback.qqId || fallback.id || '',
+    songType: qqSongActionType({ songType: track.songType ?? track.songtype ?? track.type ?? fallback.songType ?? fallback.songtype }),
     mid,
     songmid: mid,
     mediaMid: track.file && track.file.media_mid,
@@ -6397,12 +7413,18 @@ const QQ_COMMENT_PRAISE = 3;
 const QQ_COMMENT_CANCEL_PRAISE = 4;
 
 function qqRpcBlockCode(block) {
-  return Number(block && (block.code != null ? block.code : block.Code) || 0);
+  return Number(block && (
+    block.code != null ? block.code
+      : block.Code != null ? block.Code
+        : block.retcode != null ? block.retcode
+          : block.ret != null ? block.ret
+            : block.result
+  ) || 0);
 }
 function qqRpcBlockMessage(block, fallback) {
   const data = block && (block.data || block.Data) || {};
-  return (block && (block.message || block.msg || block.Msg)) ||
-    data.Msg || data.msg || data.Message || data.message || fallback || '';
+  return (block && (block.message || block.msg || block.Msg || block.retmsg || block.errmsg)) ||
+    data.Msg || data.msg || data.Message || data.message || data.retmsg || data.errmsg || fallback || '';
 }
 function qqRpcBlockOk(block) {
   return !!block && qqRpcBlockCode(block) === 0;
@@ -7215,6 +8237,71 @@ async function getLoginInfo() {
 // ====================================================================
 //  HTTP Server
 // ====================================================================
+function readWorkerStdin(timeoutMs) {
+  return new Promise(resolve => {
+    let done = false;
+    let text = '';
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(text);
+    };
+    const timer = setTimeout(finish, timeoutMs || 1200);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => {
+      text += String(chunk || '');
+      if (text.length > 256 * 1024) text = text.slice(-256 * 1024);
+    });
+    process.stdin.on('end', finish);
+    process.stdin.on('error', finish);
+    process.stdin.resume();
+  });
+}
+
+async function runSodaCookieWorkerCli() {
+  let opts = {};
+  try {
+    const raw = await readWorkerStdin(1200);
+    opts = raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    opts = {};
+  }
+  try {
+    const cookie = readSodaCookieFromClient(opts || {});
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      cookie,
+      clientDir: sodaLastLocalSync.clientDir || '',
+      lastLocalSync: sodaLastLocalSync,
+      userDataDiscoveryCache: sodaUserDataDiscoveryCache,
+    }));
+  } catch (e) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      error: e.message || String(e),
+      lastLocalSync: {
+        ...sodaLastLocalSync,
+        checkedAt: Date.now(),
+        error: e.message || String(e),
+      },
+      userDataDiscoveryCache: sodaUserDataDiscoveryCache,
+    }));
+  }
+}
+
+if (process.env.MINERADIO_SODA_COOKIE_WORKER === '1') {
+  runSodaCookieWorkerCli()
+    .then(() => process.exit(0))
+    .catch(err => {
+      try {
+        process.stdout.write(JSON.stringify({ ok: false, error: err && err.message || String(err) }));
+      } catch (e) {}
+      process.exit(1);
+    });
+  return;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost:' + PORT);
   const pn = url.pathname;
@@ -7457,7 +8544,8 @@ const server = http.createServer(async (req, res) => {
   // ---------- 歌曲URL ----------
   if (pn === '/api/qq/login/status') {
     try {
-      const info = await getQQLoginInfo();
+      const quick = url.searchParams.get('quick') === '1' || url.searchParams.get('quick') === 'true';
+      const info = await getQQLoginInfo({ quick });
       sendJSON(res, info);
     } catch (err) {
       console.error('[QQLoginStatus]', err);
@@ -7511,6 +8599,58 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[QQPlaylistTracks]', err);
       sendJSON(res, { provider: 'qq', error: err.message, tracks: [] }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/song/like/check') {
+    try {
+      const ids = String(url.searchParams.get('ids') || url.searchParams.get('id') || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const data = await handleQQSongLikeCheck(ids);
+      sendJSON(res, data);
+    } catch (err) {
+      console.error('[QQLikeCheck]', err);
+      sendJSON(res, { provider: 'qq', loggedIn: err && err.statusCode !== 401, error: err.errorCode || err.message, message: err.message, liked: {} }, err.statusCode || 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/song/like') {
+    try {
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const likeValue = body.like != null ? body.like : url.searchParams.get('like');
+      const data = await handleQQSongLike({
+        id: body.id || url.searchParams.get('id'),
+        mid: body.mid || body.songmid || url.searchParams.get('mid') || url.searchParams.get('songmid'),
+        qqId: body.qqId || body.songId || body.songid || url.searchParams.get('qqId') || url.searchParams.get('songId'),
+        songType: body.songType ?? body.songtype ?? body.qqSongType ?? body.qqType ?? url.searchParams.get('songType') ?? url.searchParams.get('songtype'),
+      }, likeValue);
+      sendJSON(res, data, data.success === false ? 409 : 200);
+    } catch (err) {
+      console.error('[QQLike]', err);
+      sendJSON(res, { provider: 'qq', loggedIn: err && err.statusCode !== 401, error: err.errorCode || err.message, message: err.message }, err.statusCode || 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/playlist/add-song') {
+    try {
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const pid = body.pid || url.searchParams.get('pid') || url.searchParams.get('dirid') || url.searchParams.get('disstid');
+      const data = await handleQQPlaylistWriteSong(pid, {
+        id: body.id || url.searchParams.get('id'),
+        mid: body.mid || body.songmid || url.searchParams.get('mid') || url.searchParams.get('songmid'),
+        qqId: body.qqId || body.songId || body.songid || url.searchParams.get('qqId') || url.searchParams.get('songId'),
+        songType: body.songType ?? body.songtype ?? body.qqSongType ?? body.qqType ?? url.searchParams.get('songType') ?? url.searchParams.get('songtype'),
+        writeId: body.writeId || body.dirid || url.searchParams.get('writeId') || url.searchParams.get('dirid'),
+      }, 'add');
+      sendJSON(res, data, data.success === false ? 409 : 200);
+    } catch (err) {
+      console.error('[QQPlaylistAddSong]', err);
+      sendJSON(res, { provider: 'qq', loggedIn: err && err.statusCode !== 401, success: false, error: err.errorCode || err.message, message: err.message }, err.statusCode || 500);
     }
     return;
   }
@@ -7612,6 +8752,55 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[SodaPlaylistTracks]', err);
       sendJSON(res, { provider: 'soda', error: err.message, tracks: [] }, 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/song/like/check') {
+    try {
+      const ids = String(url.searchParams.get('ids') || url.searchParams.get('id') || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      const data = await handleSodaSongLikeCheck(ids);
+      sendJSON(res, data);
+    } catch (err) {
+      console.error('[SodaLikeCheck]', err);
+      sendJSON(res, { provider: 'soda', loggedIn: err && err.statusCode !== 401, error: err.errorCode || err.message, message: err.message, liked: {} }, err.statusCode || 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/song/like') {
+    try {
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const likeValue = body.like != null ? body.like : url.searchParams.get('like');
+      const data = await handleSodaSongLike({
+        id: body.id || url.searchParams.get('id'),
+        sodaId: body.sodaId || url.searchParams.get('sodaId'),
+        trackId: body.trackId || body.track_id || url.searchParams.get('trackId') || url.searchParams.get('track_id'),
+      }, likeValue);
+      sendJSON(res, data, data.success === false ? 409 : 200);
+    } catch (err) {
+      console.error('[SodaLike]', err);
+      sendJSON(res, { provider: 'soda', loggedIn: err && err.statusCode !== 401, error: err.errorCode || err.message, message: err.message }, err.statusCode || 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/soda/playlist/add-song') {
+    try {
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const pid = body.pid || url.searchParams.get('pid') || url.searchParams.get('playlist_id');
+      const data = await handleSodaPlaylistAddSong(pid, {
+        id: body.id || url.searchParams.get('id'),
+        sodaId: body.sodaId || url.searchParams.get('sodaId'),
+        trackId: body.trackId || body.track_id || url.searchParams.get('trackId') || url.searchParams.get('track_id'),
+      });
+      sendJSON(res, data, data.success === false ? 409 : 200);
+    } catch (err) {
+      console.error('[SodaPlaylistAddSong]', err);
+      sendJSON(res, { provider: 'soda', loggedIn: err && err.statusCode !== 401, success: false, error: err.errorCode || err.message, message: err.message }, err.statusCode || 500);
     }
     return;
   }
@@ -8109,6 +9298,22 @@ const server = http.createServer(async (req, res) => {
           finalCode = normalizeApiCode(errBody);
           finalMessage = normalizeApiMessage(errBody) || fallbackErr.message || '';
           attempts.push({ api: 'playlist_track_add', code: finalCode, message: finalMessage, body: errBody });
+        }
+      }
+
+      if (!success && await isUserNeteaseLikedPlaylistId(pid, info)) {
+        const likeId = String(id).split(',').map(s => s.trim()).filter(Boolean)[0];
+        if (likeId) {
+          const liked = await like_song({ id: likeId, like: 'true', cookie: userCookie, timestamp: Date.now() });
+          finalBody = liked.body || liked;
+          finalCode = normalizeApiCode(liked);
+          finalMessage = normalizeApiMessage(liked);
+          success = finalCode === 200 && !(finalBody && finalBody.error);
+          attempts.push({ api: 'like_song', code: finalCode, message: finalMessage, body: finalBody });
+          if (success) {
+            sendJSON(res, { loggedIn: true, pid, id: likeId, success: true, likedFallback: true, verified: true, code: finalCode, body: finalBody, attempts });
+            return;
+          }
         }
       }
 

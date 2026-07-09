@@ -1,11 +1,8 @@
-import { createApp } from 'vue';
+﻿import { createApp } from 'vue';
 import App from './App.vue';
-import './styles/mineradio.css';
+import './styles/mineradio.scss';
+import { applyMineradioPreloadModeClass } from './composables/usePreloadModeClass.js';
 
-try {
-  document.documentElement.classList.add(localStorage.getItem('mineradio-diy-player-mode-v1') === '1' ? 'diy-mode-preload' : 'simple-mode-preload');
-} catch (e) {
-  document.documentElement.classList.add('simple-mode-preload');
-}
+applyMineradioPreloadModeClass();
 
 createApp(App).mount('#app');

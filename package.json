@@ -1,27 +1,69 @@
 {
   "name": "mineradio",
   "productName": "Mineradio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "沉浸式音乐播放器，融合天气电台、歌词舞台、粒子视觉和 3D 歌单架。",
   "author": "Mineradio",
-  "main": "desktop/main.js",
+  "main": "electron/main.cjs",
   "private": true,
   "scripts": {
+    "dev": "node scripts/dev.cjs",
     "dev:renderer": "vite --host 127.0.0.1",
-    "dev:desktop": "node build/dev-desktop.js",
-    "build:renderer": "vite build",
-    "start": "npm run build:renderer && electron .",
-    "build:win": "npm run build:renderer && electron-builder --win nsis",
-    "build:win:dir": "npm run build:renderer && electron-builder --win dir",
-    "build:mac": "npm run build:renderer && electron-builder --mac dmg zip",
+    "dev:electron": "node scripts/dev-electron.cjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --publish never",
     "release:gitee": "node build/sync-gitee-release.js"
+  },
+  "mineradio": {
+    "update": {
+      "provider": "gitee",
+      "owner": "Xiaohaojei568",
+      "repo": "Mineradio",
+      "gitee": {
+        "owner": "xiao-majie",
+        "repo": "mineradio",
+        "repository": "https://gitee.com/xiao-majie/mineradio.git",
+        "prefer": true
+      },
+      "preview": true,
+      "preferMirrors": true,
+      "mirrors": [
+        "https://gh.llkk.cc/",
+        "https://ghfast.top/",
+        "https://gh-proxy.com/"
+      ]
+    }
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "gsap": "^3.15.0",
+    "mpg123-decoder": "^1.0.3",
+    "NeteaseCloudMusicApi": "^4.32.0",
+    "vue": "^3.5.39"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "rcedit": "^5.0.2",
+    "sass": "^1.101.0",
+    "vite": "^8.1.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
   },
   "build": {
     "appId": "com.mineradio.desktop",
     "productName": "Mineradio",
+    "copyright": "Copyright (c) 2026",
     "directories": {
-      "output": "dist",
-      "buildResources": "build"
+      "buildResources": "build",
+      "output": "release"
     },
     "afterPack": "build/after-pack.js",
     "compression": "maximum",
@@ -30,13 +72,11 @@
       "zh-TW",
       "en-US"
     ],
-    "toolsets": {
-      "winCodeSign": "1.0.0"
-    },
     "files": [
-      "desktop/**/*",
+      "electron/**/*",
       "server/**/*",
       "renderer-dist/**/*",
+      "public/**/*",
       "build/icon.ico",
       "server.js",
       "dj-analyzer.js",
@@ -53,7 +93,6 @@
       "!node_modules/axios/dist/browser/**/*",
       "!node_modules/axios/dist/esm/**/*",
       "!node_modules/node-forge/dist/**/*",
-      "!node_modules/node-forge/flash/**/*",
       "!node_modules/pngjs/browser.js",
       "!node_modules/source-map/dist/**/*",
       "!node_modules/@tootallnate/quickjs-emscripten/c/**/*",
@@ -118,39 +157,5 @@
         "repo": "Mineradio"
       }
     ]
-  },
-  "mineradio": {
-    "update": {
-      "provider": "gitee",
-      "owner": "Xiaohaojei568",
-      "repo": "Mineradio",
-      "gitee": {
-        "owner": "xiao-majie",
-        "repo": "mineradio",
-        "repository": "https://gitee.com/xiao-majie/mineradio.git",
-        "prefer": true
-      },
-      "preview": true,
-      "preferMirrors": true,
-      "mirrors": [
-        "https://gh.llkk.cc/",
-        "https://ghfast.top/",
-        "https://gh-proxy.com/"
-      ]
-    }
-  },
-  "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "gsap": "^3.15.0",
-    "mpg123-decoder": "^1.0.3",
-    "NeteaseCloudMusicApi": "^4.32.0"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.7",
-    "electron": "^42.4.1",
-    "electron-builder": "^26.15.3",
-    "rcedit": "^5.0.2",
-    "vite": "^8.1.3",
-    "vue": "^3.5.39"
   }
 }
