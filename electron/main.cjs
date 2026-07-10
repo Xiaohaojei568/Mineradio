@@ -22,6 +22,8 @@ let desktopLyricsLastMiddleAt = 0;
 let wallpaperWindow = null;
 let wallpaperState = {};
 let mainWallpaperModeState = { enabled: false, opacity: 1 };
+let mainWallpaperMouseIgnored = null;
+let mainWallpaperMouseIgnoredWindow = null;
 let htmlFullscreenActive = false;
 let windowFullscreenActive = false;
 let mainWindowStateTimer = null;
@@ -1280,6 +1282,7 @@ function closeWallpaperWindow() {
 
 function applyMainWallpaperMode(win = mainWindow, payload = mainWallpaperModeState) {
   if (!win || win.isDestroyed()) return;
+  const wasEnabled = !!mainWallpaperModeState.enabled;
   mainWallpaperModeState = {
     ...mainWallpaperModeState,
     ...(payload || {}),
@@ -1291,7 +1294,25 @@ function applyMainWallpaperMode(win = mainWindow, payload = mainWallpaperModeSta
   try {
     win.setHasShadow(!mainWallpaperModeState.enabled);
   } catch (e) {}
+  if (!mainWallpaperModeState.enabled) {
+    setMainWallpaperMousePassthrough(win, false);
+  } else if (!wasEnabled) {
+    setMainWallpaperMousePassthrough(win, true);
+  }
   sendWindowState(win);
+}
+
+function setMainWallpaperMousePassthrough(win = mainWindow, passthrough) {
+  if (!win || win.isDestroyed()) return;
+  const shouldIgnore = !!passthrough && !!mainWallpaperModeState.enabled;
+  if (mainWallpaperMouseIgnoredWindow === win && mainWallpaperMouseIgnored === shouldIgnore) return;
+  mainWallpaperMouseIgnoredWindow = win;
+  mainWallpaperMouseIgnored = shouldIgnore;
+  try {
+    win.setIgnoreMouseEvents(shouldIgnore, { forward: true });
+  } catch (e) {
+    console.warn('Main wallpaper mouse passthrough failed:', e.message);
+  }
 }
 
 function closeOverlayWindows() {
@@ -1536,6 +1557,16 @@ ipcMain.handle('mineradio-main-wallpaper-update', async (event, payload) => {
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message || 'MAIN_WALLPAPER_UPDATE_FAILED' };
+  }
+});
+
+ipcMain.handle('mineradio-main-wallpaper-set-input-passthrough', async (event, passthrough) => {
+  try {
+    const win = getSenderWindow(event) || mainWindow;
+    setMainWallpaperMousePassthrough(win, !!passthrough);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'MAIN_WALLPAPER_INPUT_FAILED' };
   }
 });
 

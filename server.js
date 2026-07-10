@@ -2498,6 +2498,10 @@ const sodaPlaybackSessions = new Map();
 const sodaMediaDurationProbeCache = new Map();
 const sodaLimitedFreeInfoCache = new Map();
 
+function sodaErrorMessage(err, fallback) {
+  return String(err && (err.message || err.code) || fallback || '').trim();
+}
+
 function clearSodaRuntimeCaches(opts) {
   opts = opts || {};
   sodaLoginInfoCache = null;
@@ -3065,15 +3069,20 @@ function readSodaDeviceInfoFresh() {
 
 function initSodaNativeSecurity() {
   if (sodaNativeSecurity && sodaNativeSecurity.ready) return sodaNativeSecurity;
-  const state = sodaNativeSecurity || { ready: false, bdms: null, bdticket: null, device: null, clientDir: '', bdticketStarted: false, bdmsInitedForDevice: '' };
+  const state = sodaNativeSecurity || { ready: false, bdms: null, bdticket: null, device: null, clientDir: '', bdticketStarted: false, bdmsInitedForDevice: '', errors: {} };
+  state.errors = {};
   sodaNativeSecurity = state;
   const clientDir = resolveSodaOfficialClientDir({ allowGlobalScan: false });
   state.clientDir = clientDir;
-  if (!clientDir) return state;
+  if (!clientDir) {
+    state.errors.clientDir = 'SODA_CLIENT_NOT_FOUND';
+    return state;
+  }
   try {
     if (!state.bdms) state.bdms = require(sodaBdmsNodePath(clientDir));
   } catch (e) {
     state.bdms = null;
+    state.errors.bdms = sodaErrorMessage(e, 'BDMS_LOAD_FAILED');
   }
   try {
     if (!state.bdticket) {
@@ -3095,11 +3104,18 @@ function initSodaNativeSecurity() {
     if (state.bdticket) state.bdticket.refreshSettings(sodaBdticketSettings());
   } catch (e) {
     state.bdticket = null;
+    state.errors.bdticket = sodaErrorMessage(e, 'BDTICKET_LOAD_FAILED');
   }
   try {
-    if (!state.device && fs.existsSync(sodaDeviceNodePath(clientDir))) state.device = require(sodaDeviceNodePath(clientDir));
+    const devicePath = sodaDeviceNodePath(clientDir);
+    if (!fs.existsSync(devicePath)) {
+      state.errors.device = 'DEVICE_NODE_NOT_FOUND';
+    } else if (!state.device) {
+      state.device = require(devicePath);
+    }
   } catch (e) {
     state.device = null;
+    state.errors.device = sodaErrorMessage(e, 'DEVICE_LOAD_FAILED');
   }
   state.ready = !!(state.bdms || state.bdticket || state.device);
   return state;
@@ -3144,13 +3160,82 @@ function sodaNativeDevice() {
   if (native.device && typeof native.device.decodeSpade === 'function') return native.device;
   const clientDir = native.clientDir || resolveSodaOfficialClientDir({ allowGlobalScan: false });
   try {
-    if (clientDir && fs.existsSync(sodaDeviceNodePath(clientDir))) {
-      native.device = require(sodaDeviceNodePath(clientDir));
+    const devicePath = clientDir ? sodaDeviceNodePath(clientDir) : '';
+    native.errors = native.errors || {};
+    if (!devicePath || !fs.existsSync(devicePath)) {
+      native.errors.device = 'DEVICE_NODE_NOT_FOUND';
+    } else {
+      native.device = require(devicePath);
+      if (!native.device || typeof native.device.decodeSpade !== 'function') native.errors.device = 'DEVICE_DECODER_API_MISSING';
     }
   } catch (e) {
     native.device = null;
+    native.errors = native.errors || {};
+    native.errors.device = sodaErrorMessage(e, 'DEVICE_LOAD_FAILED');
   }
   return native.device && typeof native.device.decodeSpade === 'function' ? native.device : null;
+}
+
+function sodaPlaybackNativeStatus(opts) {
+  opts = opts || {};
+  if (opts.forceScan) {
+    resolveSodaOfficialClientDir({ allowGlobalScan: true });
+    sodaNativeSecurity = null;
+  }
+  const native = initSodaNativeSecurity();
+  const clientDir = native.clientDir || resolveSodaOfficialClientDir({ allowGlobalScan: false });
+  const devicePath = clientDir ? sodaDeviceNodePath(clientDir) : '';
+  const deviceInfo = readSodaDeviceInfo();
+  const decoder = sodaNativeDevice();
+  const errors = { ...(native.errors || {}) };
+  const clientDetected = !!(clientDir && isSodaOfficialClientDir(clientDir));
+  const status = {
+    clientDetected,
+    clientDirDetected: clientDetected,
+    clientDir: clientDir || '',
+    bdmsReady: !!native.bdms,
+    bdticketReady: !!native.bdticket,
+    deviceNodeDetected: !!(devicePath && fs.existsSync(devicePath)),
+    deviceDecoderReady: !!decoder,
+    deviceInfoReady: !!(deviceInfo && deviceInfo.did),
+    apiSignatureReady: !!(native.bdms && deviceInfo && deviceInfo.did),
+    errors,
+  };
+  status.playbackKeyReady = !!(status.apiSignatureReady && status.deviceDecoderReady);
+  status.ready = status.playbackKeyReady;
+  if (status.playbackKeyReady) status.message = '';
+  else if (!status.clientDetected) status.message = '\u672a\u68c0\u6d4b\u5230\u6c7d\u6c34\u97f3\u4e50\u5b98\u65b9\u5ba2\u6237\u7aef\uff0c\u8bf7\u5148\u5b89\u88c5\u5e76\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50';
+  else if (!status.deviceInfoReady) status.message = '\u5df2\u68c0\u6d4b\u5230\u6c7d\u6c34\u5ba2\u6237\u7aef\uff0c\u4f46\u672a\u8bfb\u5230\u672c\u673a\u8bbe\u5907\u4fe1\u606f\uff0c\u8bf7\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u540e\u91cd\u65b0\u540c\u6b65';
+  else if (!status.bdmsReady) status.message = '\u5df2\u8bc6\u522b\u6c7d\u6c34\u8d26\u53f7\uff0c\u4f46\u5b98\u65b9\u5ba2\u6237\u7aef\u64ad\u653e\u7b7e\u540d\u6a21\u5757\u672a\u5c31\u7eea';
+  else if (!status.deviceNodeDetected) status.message = '\u5df2\u8bc6\u522b\u6c7d\u6c34\u8d26\u53f7\uff0c\u4f46\u5b98\u65b9\u5ba2\u6237\u7aef\u7f3a\u5c11\u64ad\u653e\u89e3\u7801\u6a21\u5757';
+  else if (!status.deviceDecoderReady) status.message = '\u5df2\u8bc6\u522b\u6c7d\u6c34\u8d26\u53f7\uff0c\u4f46\u672c\u673a\u6c7d\u6c34\u64ad\u653e\u89e3\u7801\u6a21\u5757\u672a\u5c31\u7eea';
+  else status.message = '\u6c7d\u6c34\u64ad\u653e\u6388\u6743\u672a\u5c31\u7eea\uff0c\u8bf7\u91cd\u65b0\u540c\u6b65\u6c7d\u6c34\u97f3\u4e50\u8d26\u53f7';
+  return status;
+}
+
+function appendSodaPlaybackStatus(info, opts) {
+  const playback = sodaPlaybackNativeStatus({ forceScan: !!(opts && opts.forceScan) });
+  return {
+    ...(info || {}),
+    playbackKeyReady: !!playback.playbackKeyReady,
+    playbackReady: !!playback.ready,
+    playbackMessage: playback.message || '',
+    playbackDiagnostics: playback,
+  };
+}
+
+function sodaDecoderUnavailableError(status) {
+  status = status || sodaPlaybackNativeStatus({ forceScan: true });
+  const err = new Error(status.message || '\u6c7d\u6c34\u64ad\u653e\u89e3\u7801\u6a21\u5757\u672a\u5c31\u7eea');
+  err.code = 'SODA_DECODER_UNAVAILABLE';
+  err.category = 'soda_decoder_unavailable';
+  err.sodaPlaybackStatus = status;
+  return err;
+}
+
+function isSodaDecoderUnavailableError(err) {
+  const text = String(err && (err.code || err.category || err.message) || '').toLowerCase();
+  return text.includes('soda_decoder_unavailable') || text.includes('soda device decoder is unavailable') || text.includes('device decoder');
 }
 
 function sodaCookieObject() {
@@ -3886,6 +3971,7 @@ function sodaLocalSyncMessage() {
 }
 
 function sodaLocalSyncDiagnostics() {
+  const playback = sodaPlaybackNativeStatus({ forceScan: false });
   return {
     userDataDirCount: sodaLastLocalSync.userDataDirs.length,
     cookieDbCount: sodaLastLocalSync.cookieDbs.length,
@@ -3895,6 +3981,9 @@ function sodaLocalSyncDiagnostics() {
     localStateCount: sodaLastLocalSync.localStateCount || 0,
     encryptedPrefixes: sodaLastLocalSync.encryptedPrefixes || {},
     clientDirDetected: !!sodaLastLocalSync.clientDir,
+    playbackKeyReady: !!playback.playbackKeyReady,
+    playbackMessage: playback.message || '',
+    playbackDiagnostics: playback,
     error: sodaLastLocalSync.error || '',
   };
 }
@@ -5551,7 +5640,7 @@ function probeSodaMediaDurationMs(media, timeoutMs) {
     } catch (e) {
       decodedKey = '';
     }
-    const args = ['-hide_banner', '-nostdin', '-headers', sodaFfmpegHeaderText(media.url)];
+    const args = ['-hide_banner', '-nostdin', ...sodaFfmpegInputArgs(media.url)];
     if (decodedKey) args.push('-decryption_key', decodedKey);
     args.push('-i', media.url);
     const child = spawn(ffmpegBinaryPath, args, {
@@ -6053,6 +6142,7 @@ async function tryResolveSodaTrackV2(trackId, qualityPreference, options) {
   let onlyPreview = false;
   let fee = 0;
   let lastError = null;
+  let skippedEncryptedMedia = false;
   for (const attempt of attempts) {
     let body = {};
     try {
@@ -6078,9 +6168,15 @@ async function tryResolveSodaTrackV2(trackId, qualityPreference, options) {
       media: media ? { ...media, url: '[detected]', backupUrl: media.backupUrl ? '[detected]' : '' } : null,
       bodyBenefit,
     });
-    if (media && media.url) return { body, media, bodyBenefit, needsSignature, onlyPreview, fee, attempt, lastError };
+    if (media && media.url) {
+      if (options.skipEncryptedMedia && media.spade) {
+        skippedEncryptedMedia = true;
+        continue;
+      }
+      return { body, media, bodyBenefit, needsSignature, onlyPreview, fee, attempt, lastError, skippedEncryptedMedia };
+    }
   }
-  return { body: bestBody, media: null, bodyBenefit: bestBenefit, needsSignature, onlyPreview, fee, attempt: null, lastError };
+  return { body: bestBody, media: null, bodyBenefit: bestBenefit, needsSignature, onlyPreview, fee, attempt: null, lastError, skippedEncryptedMedia };
 }
 
 function normalizeSodaDecryptionKey(value) {
@@ -6107,7 +6203,7 @@ function decodeSodaSpade(spade) {
   const raw = String(spade || '').trim();
   if (!raw) return '';
   const device = sodaNativeDevice();
-  if (!device) throw new Error('Soda device decoder is unavailable');
+  if (!device) throw sodaDecoderUnavailableError(sodaPlaybackNativeStatus({ forceScan: true }));
   return normalizeSodaDecryptionKey(device.decodeSpade(raw));
 }
 
@@ -6118,12 +6214,13 @@ function cleanupSodaPlaybackSessions() {
   }
 }
 
-function createSodaPlaybackSession(trackId, media, qualityPreference) {
+function createSodaPlaybackSession(trackId, media, qualityPreference, playbackOptions) {
   cleanupSodaPlaybackSessions();
   if (!media || !media.url) throw new Error('Missing Soda media URL');
   if (!media.spade) return null;
   const decodedKey = decodeSodaSpade(media.spade);
   if (!decodedKey) throw new Error('Missing Soda decryption key');
+  playbackOptions = playbackOptions || {};
   const token = crypto.randomBytes(18).toString('base64url');
   sodaPlaybackSessions.set(token, {
     token,
@@ -6134,7 +6231,10 @@ function createSodaPlaybackSession(trackId, media, qualityPreference) {
     spade: media.spade,
     decodedKey,
     quality: media.quality || normalizeQualityPreference(qualityPreference),
+    qualityPreference: normalizeQualityPreference(qualityPreference),
     bitrate: media.bitrate || 0,
+    expectedDurationMs: Number(playbackOptions.expectedDurationMs || 0) || 0,
+    limitedFreeInfo: normalizeSodaLimitedFreeInfo(playbackOptions.limitedFreeInfo) || null,
   });
   return sodaPlaybackSessions.get(token);
 }
@@ -6147,13 +6247,121 @@ function ffmpegAvailable() {
   return !!(ffmpegBinaryPath && fs.existsSync(ffmpegBinaryPath));
 }
 
+function sodaAudioMediaHost(sourceUrl) {
+  try {
+    return new URL(sourceUrl).hostname.toLowerCase();
+  } catch (e) {
+    return '';
+  }
+}
+
+function sodaAudioCookieAllowed(sourceUrl) {
+  const host = sodaAudioMediaHost(sourceUrl);
+  return !!host && (host === 'qishui.com' || host.endsWith('.qishui.com'));
+}
+
+function sodaAudioRequestHeadersFor(sourceUrl, range, opts) {
+  opts = opts || {};
+  const headers = {
+    'User-Agent': sodaUserAgent(),
+    Accept: '*/*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    Referer: 'https://www.qishui.com/',
+    Origin: 'https://www.qishui.com',
+    Connection: 'keep-alive',
+  };
+  if (range) headers.Range = range;
+  if (opts.includeCookie && sodaCookie && sodaAudioCookieAllowed(sourceUrl)) headers.Cookie = sodaCookie;
+  return headers;
+}
+
 function sodaFfmpegHeaderText(sourceUrl) {
-  const headers = audioProxyHeadersFor(sourceUrl, '');
-  if (sodaCookie && !headers.Cookie && !headers.cookie) headers.Cookie = sodaCookie;
+  const headers = sodaAudioRequestHeadersFor(sourceUrl, '', { includeCookie: true });
+  delete headers['User-Agent'];
+  delete headers.Referer;
   return Object.keys(headers)
     .filter(key => headers[key] !== undefined && headers[key] !== null && headers[key] !== '')
     .map(key => `${key}: ${String(headers[key])}`)
     .join('\r\n') + '\r\n';
+}
+
+function sodaFfmpegInputArgs(sourceUrl) {
+  return [
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '2',
+    '-user_agent', sodaUserAgent(),
+    '-referer', 'https://www.qishui.com/',
+    '-headers', sodaFfmpegHeaderText(sourceUrl),
+  ];
+}
+
+function sodaPlaybackSourceList(session) {
+  const seen = new Set();
+  const sources = [];
+  [session && session.url, session && session.backupUrl].forEach(item => {
+    const value = String(item || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    sources.push(value);
+  });
+  return sources;
+}
+
+function applySodaPlaybackSessionMedia(session, media, qualityPreference) {
+  if (!session || !media || !media.url) return false;
+  let decodedKey = '';
+  if (media.spade) decodedKey = decodeSodaSpade(media.spade);
+  session.createdAt = Date.now();
+  session.url = media.url;
+  session.backupUrl = media.backupUrl || '';
+  session.spade = media.spade || '';
+  session.decodedKey = decodedKey;
+  session.quality = media.quality || session.quality || normalizeQualityPreference(qualityPreference);
+  session.qualityPreference = normalizeQualityPreference(qualityPreference || session.qualityPreference || session.quality);
+  session.bitrate = media.bitrate || session.bitrate || 0;
+  return true;
+}
+
+async function refreshSodaPlaybackSessionMedia(session) {
+  if (!session || !session.trackId) return false;
+  const qualityPreference = session.qualityPreference || session.quality || 'hires';
+  const options = {};
+  if (session.expectedDurationMs) {
+    options.expectedDurationMs = session.expectedDurationMs;
+    options.durationMs = session.expectedDurationMs;
+  }
+  if (session.limitedFreeInfo) {
+    options.limitedFreeInfo = session.limitedFreeInfo;
+    try { await trySodaMCheckMedia(session.trackId, session.limitedFreeInfo, options); } catch (e) {}
+  }
+  try {
+    let resolved = await tryResolveSodaTrackV2(session.trackId, qualityPreference, options);
+    let media = resolved && resolved.media;
+    if (!media && !session.limitedFreeInfo) {
+      const limitedFreeInfo = await getSodaLimitedFreeInfo(session.trackId, options).catch(() => null);
+      if (limitedFreeInfo) {
+        session.limitedFreeInfo = limitedFreeInfo;
+        options.limitedFreeInfo = limitedFreeInfo;
+        try { await trySodaMCheckMedia(session.trackId, limitedFreeInfo, options); } catch (e) {}
+        resolved = await tryResolveSodaTrackV2(session.trackId, qualityPreference, options);
+        media = resolved && resolved.media;
+      }
+    }
+    if (!media || !media.url) return false;
+    return applySodaPlaybackSessionMedia(session, media, qualityPreference);
+  } catch (err) {
+    console.warn('[SodaAudio] refresh source failed:', err && err.message || err);
+    return false;
+  }
+}
+
+function sodaAudioFailureMessage(stderr, fallback) {
+  const text = String(stderr || '').replace(/\s+/g, ' ').trim();
+  if (/403|Forbidden|access denied/i.test(text)) return 'source 403';
+  if (/404|Not Found/i.test(text)) return 'source 404';
+  if (/timed? out|timeout/i.test(text)) return 'source timeout';
+  return fallback || 'source failed';
 }
 
 function streamSodaDecodedAudio(req, res, token) {
@@ -6169,60 +6377,147 @@ function streamSodaDecodedAudio(req, res, token) {
     res.end('FFmpeg is unavailable');
     return;
   }
-  const sourceUrl = session.url;
-  const args = [
-    '-hide_banner',
-    '-loglevel', 'error',
-    '-nostdin',
-    '-headers', sodaFfmpegHeaderText(sourceUrl),
-    '-decryption_key', session.decodedKey,
-    '-i', sourceUrl,
-    '-vn',
-    '-codec:a', 'libmp3lame',
-    '-b:a', '192k',
-    '-f', 'mp3',
-    'pipe:1',
-  ];
-  let stderr = '';
-  let closed = false;
-  const child = spawn(ffmpegBinaryPath, args, {
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  function stopChild() {
-    if (closed) return;
-    closed = true;
-    try { if (!child.killed) child.kill('SIGKILL'); } catch (e) {}
+  const attemptedSources = new Set();
+  let pendingSources = sodaPlaybackSourceList(session);
+  let currentChild = null;
+  let clientClosed = false;
+  let refreshTried = false;
+  let totalBytesSent = 0;
+  let lastFailure = '';
+
+  function writeAudioHeaders() {
+    if (res.headersSent) return;
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'X-Accel-Buffering': 'no',
+    });
   }
-  child.stderr.on('data', chunk => {
-    stderr += chunk.toString('utf8');
-    if (stderr.length > 4000) stderr = stderr.slice(-4000);
-  });
-  child.on('error', err => {
-    console.error('[SodaAudio] ffmpeg start failed:', err.message);
+
+  function stopCurrentChild() {
+    try { if (currentChild && !currentChild.killed) currentChild.kill('SIGKILL'); } catch (e) {}
+  }
+
+  function finishWithoutSource() {
+    if (clientClosed || res.writableEnded) return;
     if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
-      res.end('Soda audio transcode failed');
-    } else if (!res.writableEnded) {
+      res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+      res.end(lastFailure || 'Soda audio source unavailable');
+    } else {
       res.end();
     }
+  }
+
+  function queueSessionSources() {
+    sodaPlaybackSourceList(session).forEach(sourceUrl => {
+      if (!attemptedSources.has(sourceUrl) && !pendingSources.includes(sourceUrl)) pendingSources.push(sourceUrl);
+    });
+  }
+
+  function startNextSource(reason) {
+    if (clientClosed || res.writableEnded) return;
+    if (!pendingSources.length) {
+      if (!refreshTried) {
+        refreshTried = true;
+        refreshSodaPlaybackSessionMedia(session)
+          .then(ok => {
+            if (ok) queueSessionSources();
+            startNextSource(ok ? 'refreshed source' : reason);
+          })
+          .catch(err => {
+            lastFailure = err && err.message || String(err || reason || 'source refresh failed');
+            startNextSource(lastFailure);
+          });
+        return;
+      }
+      finishWithoutSource();
+      return;
+    }
+
+    const sourceUrl = pendingSources.shift();
+    attemptedSources.add(sourceUrl);
+    const args = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-nostdin',
+      ...sodaFfmpegInputArgs(sourceUrl),
+    ];
+    if (session.decodedKey) args.push('-decryption_key', session.decodedKey);
+    args.push(
+      '-i', sourceUrl,
+      '-vn',
+      '-codec:a', 'libmp3lame',
+      '-b:a', '192k',
+      '-f', 'mp3',
+      'pipe:1',
+    );
+    let stderr = '';
+    let sourceBytes = 0;
+    const child = spawn(ffmpegBinaryPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    currentChild = child;
+    let sourceSettled = false;
+    function settleSource() {
+      if (sourceSettled) return false;
+      sourceSettled = true;
+      return true;
+    }
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString('utf8');
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
+    });
+    child.stdout.on('data', chunk => {
+      sourceBytes += chunk.length;
+      totalBytesSent += chunk.length;
+      writeAudioHeaders();
+      if (!res.write(chunk)) {
+        child.stdout.pause();
+        res.once('drain', () => {
+          try { child.stdout.resume(); } catch (e) {}
+        });
+      }
+    });
+    child.on('error', err => {
+      if (!settleSource()) return;
+      if (currentChild === child) currentChild = null;
+      lastFailure = err && err.message || 'ffmpeg start failed';
+      console.error('[SodaAudio] ffmpeg start failed:', lastFailure);
+      if (!sourceBytes && !clientClosed) startNextSource(lastFailure);
+      else if (!res.writableEnded) res.end();
+    });
+    child.on('close', code => {
+      if (!settleSource()) return;
+      if (currentChild === child) currentChild = null;
+      if (clientClosed) return;
+      if (code && code !== 0) {
+        lastFailure = sodaAudioFailureMessage(stderr, 'ffmpeg exited ' + code);
+        console.error('[SodaAudio] ffmpeg exited:', code, lastFailure);
+      }
+      if (code && code !== 0 && !sourceBytes && !totalBytesSent) {
+        startNextSource(lastFailure);
+        return;
+      }
+      if (!res.writableEnded) {
+        if (totalBytesSent) res.end();
+        else finishWithoutSource();
+      }
+    });
+  }
+
+  req.on('close', () => {
+    clientClosed = true;
+    stopCurrentChild();
   });
-  child.on('close', code => {
-    closed = true;
-    if (code && code !== 0) console.error('[SodaAudio] ffmpeg exited:', code, stderr.trim());
-    if (!res.writableEnded) res.end();
+  res.on('close', () => {
+    clientClosed = true;
+    stopCurrentChild();
   });
-  req.on('close', stopChild);
-  res.on('close', stopChild);
-  res.writeHead(200, {
-    'Content-Type': 'audio/mpeg',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0',
-    'X-Accel-Buffering': 'no',
-  });
-  child.stdout.pipe(res);
+  startNextSource('initial source');
 }
 
 function sodaSignalHasContent(value) {
@@ -6307,11 +6602,31 @@ function sodaPlaybackFeeFromBody(body) {
   return hasSodaPlaybackTrialSignal(body, 0) ? 1 : 0;
 }
 
+async function tryResolveSodaUnencryptedPlaybackFallback(trackId, options) {
+  const tried = new Set();
+  const qualities = ['standard'];
+  for (const quality of qualities) {
+    const normalized = normalizeQualityPreference(quality);
+    if (tried.has(normalized)) continue;
+    tried.add(normalized);
+    const resolved = await tryResolveSodaTrackV2(trackId, normalized, {
+      ...(options || {}),
+      qualityPreference: normalized,
+      skipEncryptedMedia: true,
+    });
+    if (resolved && resolved.media && resolved.media.url && !resolved.media.spade) {
+      return { ...resolved, fallbackQuality: normalized };
+    }
+  }
+  return null;
+}
+
 async function handleSodaSongUrl(id, qualityPreference, options) {
   options = options || {};
   const trackId = String(id || '').trim();
   if (!trackId) return { provider: 'soda', url: '', error: 'MISSING_ID', message: 'Missing Soda track id' };
   let body = {};
+  let playbackError = null;
   let signatureRetried = false;
   let limitedFreeSynced = false;
   let playbackLimitedFreeInfo = normalizeSodaLimitedFreeInfo(options.limitedFreeInfo || options.limitedFreeParam) || cachedSodaLimitedFreeInfo(trackId);
@@ -6365,8 +6680,29 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
       let playUrl = media.url;
       let localTranscode = false;
       let encrypted = !!media.spade;
+      let decoderFallbackQuality = '';
       if (encrypted) {
-        const session = createSodaPlaybackSession(trackId, media, qualityPreference);
+        const playbackStatus = sodaPlaybackNativeStatus({ forceScan: false });
+        if (!playbackStatus.deviceDecoderReady) {
+          const fallback = await tryResolveSodaUnencryptedPlaybackFallback(trackId, options);
+          if (fallback && fallback.media && fallback.media.url) {
+            body = fallback.body || body;
+            bodyBenefit = fallback.bodyBenefit || sodaFreeBenefitSummary([body]);
+            media = fallback.media;
+            playUrl = media.url;
+            encrypted = !!media.spade;
+            decoderFallbackQuality = fallback.fallbackQuality || '';
+          }
+        }
+      }
+      const expectedDurationMsForPlayback = sodaExpectedDurationMs(body, options);
+      if (encrypted) {
+        const playbackStatus = sodaPlaybackNativeStatus({ forceScan: true });
+        if (!playbackStatus.deviceDecoderReady) throw sodaDecoderUnavailableError(playbackStatus);
+        const session = createSodaPlaybackSession(trackId, media, qualityPreference, {
+          expectedDurationMs: expectedDurationMsForPlayback,
+          limitedFreeInfo: playbackLimitedFreeInfo,
+        });
         playUrl = sodaPlaybackUrlForToken(session.token);
         localTranscode = true;
       }
@@ -6386,7 +6722,8 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
         rememberSodaFreeBenefit(playbackBenefit);
         loginInfo = { ...loginInfo, ...playbackBenefit };
       }
-      const expectedDurationMs = sodaExpectedDurationMs(body, options);
+      const playbackStatusForResult = sodaPlaybackNativeStatus({ forceScan: false });
+      const expectedDurationMs = expectedDurationMsForPlayback;
       const verifiedFullLength = expectedDurationMs > 90000 && media.durationMs > 0 && !sodaMediaDurationIsTooShort(media.durationMs, expectedDurationMs);
       const metadataTrial = verifiedFullLength ? false : shouldMarkPlayableAsTrial('soda', { ...options, songFee: fee }, loginInfo, { fee });
       const result = {
@@ -6403,6 +6740,8 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
         hasFreeBenefit: !!loginInfo.hasFreeBenefit,
         freeBenefitLabel: loginInfo.freeBenefitLabel || '',
         freeBenefitExpiresAt: loginInfo.freeBenefitExpiresAt || 0,
+        playbackKeyReady: !!playbackStatusForResult.playbackKeyReady,
+        playbackDiagnostics: playbackStatusForResult,
         level: resolvedLevel,
         quality: media.quality ? ('Soda Music ' + media.quality) : 'Soda Music',
         br: media.bitrate || 0,
@@ -6419,6 +6758,7 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
         encrypted,
         signatureRetried,
         limitedFreeSynced,
+        decoderFallbackQuality,
       };
       if (metadataTrial) {
         result.restriction = playableTrialRestriction('soda', fee, loginInfo, { code: 0 });
@@ -6428,28 +6768,38 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
       return result;
     }
   } catch (e) {
+    playbackError = e;
     body = { status_info: { status_msg: e.message } };
   }
   const code = Number(body && body.status_code || 0);
   const rawMessage = sodaApiErrorMessage(body, '');
   const failedBenefit = sodaFreeBenefitSummary([body, sodaLoginInfoCache && sodaLoginInfoCache.info]);
   rememberSodaFreeBenefit(failedBenefit);
-  const restriction = playbackRestriction(
-    'soda',
-    code === 1000062 ? 'client_signature_required' : 'url_unavailable',
-    rawMessage || (failedBenefit.hasFreeBenefit
+  const decoderUnavailable = isSodaDecoderUnavailableError(playbackError);
+  const playbackStatus = decoderUnavailable
+    ? (playbackError && playbackError.sodaPlaybackStatus || sodaPlaybackNativeStatus({ forceScan: false }))
+    : sodaPlaybackNativeStatus({ forceScan: false });
+  const category = decoderUnavailable ? 'soda_decoder_unavailable' : (code === 1000062 ? 'client_signature_required' : 'url_unavailable');
+  const action = (decoderUnavailable || code === 1000062) ? 'official_client_required' : 'switch_source';
+  const fallbackMessage = decoderUnavailable
+    ? (playbackStatus.message || '\u5df2\u8bc6\u522b\u6c7d\u6c34\u8d26\u53f7\uff0c\u4f46\u672c\u673a\u6c7d\u6c34\u64ad\u653e\u89e3\u7801\u6a21\u5757\u672a\u5c31\u7eea')
+    : (failedBenefit.hasFreeBenefit
       ? '\u5df2\u8bc6\u522b\u5230\u6c7d\u6c34\u9650\u65f6\u514d\u8d39\u6743\u76ca\uff0c\u4f46\u6c7d\u6c34\u97f3\u4e50\u4ecd\u672a\u8fd4\u56de\u53ef\u64ad\u653e\u5730\u5740\uff0c\u8bf7\u5237\u65b0\u8d26\u53f7\u4fe1\u606f\u540e\u91cd\u8bd5'
       : code === 1000062
       ? '\u6c7d\u6c34\u97f3\u4e50\u9700\u8981\u672c\u673a\u5b98\u65b9\u5ba2\u6237\u7aef\u64ad\u653e\u7b7e\u540d\uff0c\u5df2\u81ea\u52a8\u91cd\u8bd5\u4f46\u4ecd\u672a\u62ff\u5230\u53ef\u64ad\u653e\u5730\u5740'
-      : '\u6c7d\u6c34\u97f3\u4e50\u6ca1\u6709\u8fd4\u56de\u53ef\u64ad\u653e\u5730\u5740'),
-    code === 1000062 ? 'official_client_required' : 'switch_source',
-    { code, rawMessage, signatureRetried, clientDetected: sodaClientDetected(false), diagnostics: sodaLocalSyncDiagnostics() }
+      : '\u6c7d\u6c34\u97f3\u4e50\u6ca1\u6709\u8fd4\u56de\u53ef\u64ad\u653e\u5730\u5740');
+  const restriction = playbackRestriction(
+    'soda',
+    category,
+    decoderUnavailable ? fallbackMessage : (rawMessage || fallbackMessage),
+    action,
+    { code, rawMessage, signatureRetried, clientDetected: sodaClientDetected(false), playbackKeyReady: playbackStatus.playbackKeyReady, playbackDiagnostics: playbackStatus, diagnostics: sodaLocalSyncDiagnostics() }
   );
   return {
     provider: 'soda',
     url: '',
     playable: false,
-    error: 'SODA_URL_UNAVAILABLE',
+    error: decoderUnavailable ? 'SODA_DECODER_UNAVAILABLE' : 'SODA_URL_UNAVAILABLE',
     restriction,
     reason: restriction.category,
     message: restriction.message,
@@ -6461,6 +6811,8 @@ async function handleSodaSongUrl(id, qualityPreference, options) {
     signatureRetried,
     limitedFreeSynced,
     clientDetected: sodaClientDetected(false),
+    playbackKeyReady: !!playbackStatus.playbackKeyReady,
+    playbackDiagnostics: playbackStatus,
     requestedQuality: normalizeQualityPreference(qualityPreference),
   };
 }
@@ -7265,8 +7617,9 @@ function audioProxyHeadersFor(audioUrl, range) {
   try {
     const host = new URL(audioUrl).hostname.toLowerCase();
     if (host.includes('qq.com') || host.includes('qpic.cn')) headers.Referer = 'https://y.qq.com/';
-    if (host.includes('douyinvod.com') || host.includes('bytevod.com') || host.includes('qishui.com')) {
-      headers = { 'User-Agent': sodaUserAgent() };
+    if (host.includes('douyinvod.com') || host.includes('bytevod.com') || host.includes('qishui.com') || host.includes('bdcgslb.com')) {
+      headers = sodaAudioRequestHeadersFor(audioUrl, range, { includeCookie: false });
+      return headers;
     }
   } catch (e) {}
   if (range) headers.Range = range;
@@ -9697,12 +10050,12 @@ const server = http.createServer(async (req, res) => {
       const quick = url.searchParams.get('quick') === '1' || url.searchParams.get('quick') === 'true';
       const debug = url.searchParams.get('debug') === '1' || url.searchParams.get('debug') === 'true';
       if (sync) sodaAutoSyncEnabled = true;
-      const info = await getSodaLoginInfo({ sync, skipLocalSync: quick });
+      const info = appendSodaPlaybackStatus(await getSodaLoginInfo({ sync, skipLocalSync: quick }), { forceScan: sync });
       if (debug) info.debug = sodaLoginDebugSnapshot();
       sendJSON(res, info);
     } catch (err) {
       console.error('[SodaLoginStatus]', err);
-      sendJSON(res, { provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', error: err.message }, 500);
+      sendJSON(res, appendSodaPlaybackStatus({ provider: 'soda', loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', error: err.message }), 500);
     }
     return;
   }

@@ -19149,8 +19149,8 @@ function playbackRestrictionMessage(song, data) {
   var restriction = data.restriction || {};
   var category = data.reason || restriction.category || '';
   var provider = playbackProviderLabel(song);
-  if (songProviderKey(song) === 'soda' && category === 'client_signature_required') {
-    return '\u6c7d\u6c34\u97f3\u4e50\u64ad\u653e\u7b7e\u540d\u5df2\u81ea\u52a8\u91cd\u8bd5\u4f46\u4ecd\u672a\u901a\u8fc7\uff0c\u8bf7\u4fdd\u6301\u5b98\u65b9\u5ba2\u6237\u7aef\u5df2\u6253\u5f00\u540e\u91cd\u65b0\u540c\u6b65\u767b\u5f55';
+  if (songProviderKey(song) === 'soda' && (category === 'client_signature_required' || category === 'soda_decoder_unavailable')) {
+    return data.message || restriction.message || '\u5df2\u8bc6\u522b\u6c7d\u6c34\u8d26\u53f7\uff0c\u4f46\u672c\u673a\u6c7d\u6c34\u64ad\u653e\u89e3\u7801\u6a21\u5757\u672a\u5c31\u7eea\uff0c\u8bf7\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u540e\u91cd\u65b0\u540c\u6b65';
   }
   var message = data.message || restriction.message || '';
   if (!message) {
@@ -19285,8 +19285,10 @@ function isSodaClientSignatureRestriction(song, data) {
   var code = Number(data.sodaCode || restriction.code || 0) || 0;
   var raw = String(data.rawMessage || data.message || restriction.message || '').toLowerCase();
   return category === 'client_signature_required'
+    || category === 'soda_decoder_unavailable'
+    || data.error === 'SODA_DECODER_UNAVAILABLE'
     || code === 1000062
-    || /signature|bdms|bdticket|official client|client signature|官方客户端签名|播放签名/.test(raw);
+    || /signature|bdms|bdticket|official client|client signature|device decoder|soda_decoder|官方客户端签名|播放签名|\u89e3\u7801\u6a21\u5757/.test(raw);
 }
 function shouldAllowCrossProviderPlaybackFallback(song, data) {
   if (typeof currentAccountScope !== 'function') return false;
@@ -19472,7 +19474,7 @@ async function tryAutoPlaybackFallback(song, data, idx, token, opts) {
   var fromLabel = playbackProviderLabel(song);
   var targetProvider = alternatePlaybackProvider(song);
   var targetLabel = targetProvider === 'qq' ? 'QQ 音乐' : (targetProvider === 'soda' ? '汽水音乐' : '网易云');
-  showSourceFallbackNotice('正在自动换源', (isSodaClientSignatureRestriction(song, data) ? '汽水播放签名暂不可用，' : fromLabel + ' 当前不可播，') + '正在查找 ' + targetLabel + ' 的同名同歌手版本。');
+  showSourceFallbackNotice('正在自动换源', (isSodaClientSignatureRestriction(song, data) ? '汽水播放授权暂不可用，' : fromLabel + ' 当前不可播，') + '正在查找 ' + targetLabel + ' 的同名同歌手版本。');
   try {
     var alternate = await searchAlternatePlatformSong(song);
     if (token !== trackSwitchToken) return true;
@@ -25731,7 +25733,7 @@ function truthyProviderFlag(value) {
   return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true';
 }
 function normalizeSodaLoginStatus(info) {
-  var fallback = { provider: 'soda', loggedIn: false, nickname: '汽水音乐', userId: '', avatar: '', vipType: 0, vipStage: '', vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasFreeBenefit: false, freeBenefitLabel: '', freeBenefitExpiresAt: 0, stale: false };
+  var fallback = { provider: 'soda', loggedIn: false, nickname: '汽水音乐', userId: '', avatar: '', vipType: 0, vipStage: '', vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP', hasFreeBenefit: false, freeBenefitLabel: '', freeBenefitExpiresAt: 0, stale: false, playbackKeyReady: false, playbackReady: false, playbackMessage: '', playbackDiagnostics: null };
   var rawLevel = String(info && (info.vipLevel || info.vip_level) || '').toLowerCase();
   var vipStage = String(info && (info.vipStage || info.vip_stage || info.membershipType || info.membership_type) || '').toLowerCase();
   var vipType = Number(info && (info.vipType || info.vip_type) || 0) || 0;
@@ -25745,6 +25747,9 @@ function normalizeSodaLoginStatus(info) {
   var isVip = isSvip || truthyProviderFlag(info && (info.isVip || info.is_vip)) || rawLevel === 'vip' || vipStage === 'vip' || vipStage === 'svip' || vipType > 0;
   var vipLevel = isSvip ? 'svip' : (isVip ? 'vip' : 'none');
   var vipLabel = info && info.vipLabel || info && info.vip_label || (vipLevel === 'svip' ? 'SVIP' : (vipLevel === 'vip' ? 'VIP' : (hasFreeBenefit ? freeBenefitLabel : '无VIP')));
+  var playbackKeyReady = truthyProviderFlag(info && (info.playbackKeyReady || info.playbackReady));
+  var playbackMessage = info && (info.playbackMessage || info.playback_message) || '';
+  var playbackDiagnostics = info && (info.playbackDiagnostics || info.playback_diagnostics) || null;
   if (!info || !info.loggedIn) return Object.assign({}, fallback, info || {}, {
     provider: 'soda',
     loggedIn: false,
@@ -25760,6 +25765,10 @@ function normalizeSodaLoginStatus(info) {
     hasFreeBenefit: hasFreeBenefit,
     freeBenefitLabel: freeBenefitLabel,
     freeBenefitExpiresAt: freeBenefitExpiresAt,
+    playbackKeyReady: playbackKeyReady,
+    playbackReady: playbackKeyReady,
+    playbackMessage: playbackMessage,
+    playbackDiagnostics: playbackDiagnostics,
     stale: !!(info && info.stale)
   });
   return Object.assign({}, fallback, info, {
@@ -25777,6 +25786,10 @@ function normalizeSodaLoginStatus(info) {
     hasFreeBenefit: hasFreeBenefit,
     freeBenefitLabel: freeBenefitLabel,
     freeBenefitExpiresAt: freeBenefitExpiresAt,
+    playbackKeyReady: playbackKeyReady,
+    playbackReady: playbackKeyReady,
+    playbackMessage: playbackMessage,
+    playbackDiagnostics: playbackDiagnostics,
     stale: !!info.stale
   });
 }
@@ -25918,7 +25931,7 @@ function updateLoginProviderUi() {
   if (st) {
     st.className = (isQQ || isSoda) ? 'preview' : '';
     st.textContent = isSoda
-      ? (sodaLoginStatus.loggedIn ? ('已连接汽水音乐 · ' + (sodaLoginStatus.nickname || '')) : '点击“读取本机登录”同步汽水音乐会话')
+      ? (sodaLoginStatus.loggedIn ? ('已连接汽水音乐 · ' + (sodaLoginStatus.nickname || '') + (sodaLoginStatus.playbackKeyReady ? '' : ' · \u64ad\u653e\u6388\u6743\u672a\u5c31\u7eea')) : '点击“读取本机登录”同步汽水音乐会话')
       : isQQ
       ? (qqLoginStatus.loggedIn ? ('已保存 QQ 音乐会话 · ' + (qqLoginStatus.nickname || '')) : '点击“扫码登录”打开 QQ 音乐官方窗口')
       : (canOpenNeteaseWeb ? '点击“网页登录”打开网易云官方窗口' : '正在生成二维码…');
@@ -25951,7 +25964,7 @@ async function refreshQr() {
     if (sodaImg) sodaImg.src = '';
     var sodaInfo = await refreshSodaLoginStatus(false);
     if (sodaStatus) {
-      sodaStatus.textContent = sodaInfo && sodaInfo.loggedIn ? ('已连接汽水音乐 · ' + (sodaInfo.nickname || '')) : '点击“读取本机登录”同步汽水音乐会话';
+      sodaStatus.textContent = sodaInfo && sodaInfo.loggedIn ? ('已连接汽水音乐 · ' + (sodaInfo.nickname || '') + (sodaInfo.playbackKeyReady ? '' : ' · \u64ad\u653e\u6388\u6743\u672a\u5c31\u7eea')) : '点击“读取本机登录”同步汽水音乐会话';
       sodaStatus.className = 'preview';
     }
     return;
@@ -26068,10 +26081,11 @@ async function syncSodaLoginFromLocal() {
     refreshUserPlaylists(true);
     homeDiscoverState.loaded = false;
     loadHomeDiscover(true);
-    if (statusEl) { statusEl.textContent = '汽水音乐会话已同步'; statusEl.className = 'scan'; }
+    var sodaPlaybackReady = !!info.playbackKeyReady;
+    if (statusEl) { statusEl.textContent = sodaPlaybackReady ? '汽水音乐会话已同步' : ('汽水音乐账号已同步 · ' + (info.playbackMessage || '\u64ad\u653e\u6388\u6743\u672a\u5c31\u7eea')); statusEl.className = sodaPlaybackReady ? 'scan' : 'preview'; }
     setTimeout(function(){
       closeLoginModal();
-      showToast('汽水音乐已连接: ' + (info.nickname || info.userId || ''));
+      showToast((sodaPlaybackReady ? '汽水音乐已连接: ' : '汽水账号已同步，播放授权未就绪: ') + (info.nickname || info.userId || ''));
     }, 420);
   } catch (e) {
     if (statusEl) { statusEl.textContent = e && e.message ? e.message : '汽水音乐同步失败'; statusEl.className = 'fail'; }
@@ -26264,8 +26278,11 @@ function updateUserModalUi() {
       vipEl.style.color = hasProviderVip('qq', st) ? 'rgba(0,245,212,0.82)' : 'rgba(0,245,212,0.58)';
     } else {
       var sodaVipText = providerVipText('soda', st);
-      vipEl.textContent = 'UID: ' + ((st && st.userId) || '-') + (sodaVipText ? ('  ·  ' + sodaVipText) : '');
-      vipEl.style.color = (hasProviderVip('soda', st) || hasProviderFreeBenefit('soda', st)) ? 'rgba(255,122,158,0.86)' : 'rgba(255,122,158,0.62)';
+      var sodaPlaybackReady = !!(st && st.playbackKeyReady);
+      var sodaPlaybackText = st && st.loggedIn && !sodaPlaybackReady ? '\u64ad\u653e\u6388\u6743\u672a\u5c31\u7eea' : '';
+      vipEl.textContent = 'UID: ' + ((st && st.userId) || '-') + (sodaVipText ? ('  ·  ' + sodaVipText) : '') + (sodaPlaybackText ? ('  ·  ' + sodaPlaybackText) : '');
+      vipEl.title = sodaPlaybackText ? ((st && st.playbackMessage) || '\u8bf7\u6253\u5f00\u6c7d\u6c34\u97f3\u4e50\u5ba2\u6237\u7aef\u540e\u70b9\u51fb\u5237\u65b0\u8d26\u53f7\u4fe1\u606f') : '';
+      vipEl.style.color = sodaPlaybackText ? 'rgba(255,210,120,0.86)' : ((hasProviderVip('soda', st) || hasProviderFreeBenefit('soda', st)) ? 'rgba(255,122,158,0.86)' : 'rgba(255,122,158,0.62)');
     }
   }
   ['netease','qq','soda','both'].forEach(function(key){
@@ -29444,6 +29461,136 @@ function applyWallpaperModeVisuals(payload) {
   document.body.classList.toggle('wallpaper-mode', enabled);
   document.documentElement.style.setProperty('--wallpaper-background-alpha', backgroundAlpha.toFixed(3));
 }
+var mainWallpaperInputState = {
+  bound: false,
+  passthrough: null,
+  raf: 0,
+  lastX: -1,
+  lastY: -1
+};
+var MAIN_WALLPAPER_INTERACTIVE_SELECTOR = [
+  'button',
+  'a[href]',
+  'input',
+  'textarea',
+  'select',
+  'label',
+  '[role="button"]',
+  '[onclick]',
+  '[data-window-action]',
+  '#search-area',
+  '#top-right',
+  '#fx-panel',
+  '#fx-fab',
+  '#fx-fab-hide-btn',
+  '#playlist-panel',
+  '#bottom-bar',
+  '#bottom-handle',
+  '#thumb-wrap',
+  '#mini-queue-popover',
+  '#trial-banner',
+  '#source-fallback-notice',
+  '#drop-overlay',
+  '#toast',
+  '#ai-depth-chip',
+  '#beat-chip',
+  '.modal-mask',
+  '.modal',
+  '.track-detail-modal',
+  '.cover-color-pop',
+  '.color-lab-pop',
+  '.quality-popover',
+  '.speed-popover',
+  '.volume-popover',
+  '.desktop-mode-btn',
+  '.desktop-window-btn',
+  '.ctrl-btn',
+  '.icon-btn',
+  '.fx-mini-btn',
+  '.bubble-danmaku-like'
+].join(',');
+
+function setMainWallpaperInputPassthrough(passthrough, force) {
+  var api = getDesktopWindowApi();
+  if (!api || typeof api.setMainWallpaperInputPassthrough !== 'function') return;
+  var shouldPassThrough = !!passthrough && !!(fx && fx.wallpaperMode);
+  if (!force && mainWallpaperInputState.passthrough === shouldPassThrough) return;
+  mainWallpaperInputState.passthrough = shouldPassThrough;
+  api.setMainWallpaperInputPassthrough(shouldPassThrough).catch(function(e){
+    console.warn('wallpaper input passthrough failed:', e);
+  });
+}
+
+function isMainWallpaperInteractiveElement(target) {
+  if (!target || !target.closest) return false;
+  var interactive = target.closest(MAIN_WALLPAPER_INTERACTIVE_SELECTOR);
+  if (!interactive) return false;
+  if (interactive.matches && interactive.matches('html,body,#app,#canvas-container,#fullscreen-diy-zone,#empty-home,canvas')) return false;
+  var style = null;
+  try {
+    style = window.getComputedStyle(interactive);
+  } catch (e) {}
+  if (!style) return true;
+  if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
+  if (Number(style.opacity) <= 0.02) return false;
+  return true;
+}
+
+function syncMainWallpaperInputFromPoint(x, y, force) {
+  if (!(fx && fx.wallpaperMode)) {
+    setMainWallpaperInputPassthrough(false, !!force);
+    return;
+  }
+  if (!isFinite(x) || !isFinite(y)) {
+    setMainWallpaperInputPassthrough(true, !!force);
+    return;
+  }
+  var target = null;
+  try {
+    target = document.elementFromPoint(x, y);
+  } catch (e) {}
+  setMainWallpaperInputPassthrough(!isMainWallpaperInteractiveElement(target), !!force);
+}
+
+function syncMainWallpaperInputFromLastPoint(force) {
+  syncMainWallpaperInputFromPoint(mainWallpaperInputState.lastX, mainWallpaperInputState.lastY, !!force);
+}
+
+function queueMainWallpaperInputSync(e, force) {
+  if (e && isFinite(e.clientX) && isFinite(e.clientY)) {
+    mainWallpaperInputState.lastX = e.clientX;
+    mainWallpaperInputState.lastY = e.clientY;
+  }
+  if (!(fx && fx.wallpaperMode)) {
+    setMainWallpaperInputPassthrough(false, !!force);
+    return;
+  }
+  if (force) {
+    syncMainWallpaperInputFromLastPoint(true);
+    return;
+  }
+  if (mainWallpaperInputState.raf) return;
+  mainWallpaperInputState.raf = requestAnimationFrame(function(){
+    mainWallpaperInputState.raf = 0;
+    syncMainWallpaperInputFromLastPoint(false);
+  });
+}
+
+function bindMainWallpaperInputPassthrough() {
+  if (mainWallpaperInputState.bound) return;
+  mainWallpaperInputState.bound = true;
+  var onMove = function(e){ queueMainWallpaperInputSync(e, false); };
+  document.addEventListener('mousemove', onMove, { passive: true, capture: true });
+  document.addEventListener('pointermove', onMove, { passive: true, capture: true });
+  document.addEventListener('mouseover', onMove, { passive: true, capture: true });
+  document.addEventListener('pointerdown', function(e){ queueMainWallpaperInputSync(e, true); }, { passive: true, capture: true });
+  document.addEventListener('mouseleave', function(){
+    if (fx && fx.wallpaperMode) setMainWallpaperInputPassthrough(true, false);
+  }, true);
+  window.addEventListener('blur', function(){
+    if (fx && fx.wallpaperMode) setMainWallpaperInputPassthrough(true, false);
+  });
+}
 function pushDesktopLyricsState(force) {
   var api = getDesktopWindowApi();
   if (!api || typeof api.updateDesktopLyrics !== 'function') return;
@@ -29486,9 +29633,15 @@ function applyWallpaperModeState(force) {
   normalizeDevelopmentLockedFxState();
   var payload = wallpaperPayload();
   applyWallpaperModeVisuals(payload);
+  bindMainWallpaperInputPassthrough();
+  if (!payload.enabled) setMainWallpaperInputPassthrough(false, true);
   if (!api) return;
   if (typeof api.setMainWallpaperMode === 'function') {
-    api.setMainWallpaperMode(!!payload.enabled, payload).catch(function(e){ console.warn('wallpaper state failed:', e); });
+    api.setMainWallpaperMode(!!payload.enabled, payload).then(function(){
+      syncMainWallpaperInputFromLastPoint(true);
+    }).catch(function(e){ console.warn('wallpaper state failed:', e); });
+  } else {
+    syncMainWallpaperInputFromLastPoint(true);
   }
   if (typeof api.setWallpaperMode === 'function') {
     api.setWallpaperMode(false, payload).catch(function(e){ console.warn('legacy wallpaper close failed:', e); });
