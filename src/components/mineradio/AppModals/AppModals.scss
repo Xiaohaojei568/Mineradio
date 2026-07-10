@@ -1,4 +1,4 @@
-/* ---------- 妯℃€?---------- */
+/* ---------- 弹窗 ---------- */
 #login-guide-canvas{position:fixed;inset:0;z-index:49;width:100%;height:100%;opacity:0;pointer-events:none;transition:opacity .24s ease}
 body.login-guide-active #login-guide-canvas{opacity:1}
 .modal-mask{position:fixed;inset:0;z-index:50;background:radial-gradient(circle at 50% 48%,rgba(244,210,138,.07),transparent 34%),rgba(0,0,0,0.78);display:none;align-items:center;justify-content:center;opacity:0;visibility:hidden}
@@ -50,6 +50,8 @@ body.login-guide-active #login-guide-canvas{opacity:1}
 .account-hint{margin-top:10px;font-size:11px;line-height:1.45;color:rgba(255,255,255,.38)}
 .modal .btn-row{display:flex;gap:10px;justify-content:center;margin-top:16px}
 .dual-login-modal .btn-row{flex-wrap:wrap}
+.dual-user-modal .btn-row{flex-wrap:wrap}
+.dual-user-modal .btn-row .modal-btn{min-width:104px}
 .modal-btn{padding:8px 20px;font-size:12.5px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.05);color:#fff;cursor:pointer;letter-spacing:.5px;transition:all .2s;font-family:inherit}
 .modal-btn:hover{background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.3)}
 .modal-btn.primary{background:rgba(244,210,138,0.14);border-color:rgba(244,210,138,0.50);color:var(--champagne)}
@@ -108,7 +110,7 @@ body.login-guide-active #login-guide-canvas{opacity:1}
 .collect-list{max-height:min(300px,45vh);overflow:auto;display:flex;flex-direction:column;gap:7px;padding-right:2px}
 .collect-list::-webkit-scrollbar{width:3px}
 .collect-list::-webkit-scrollbar-thumb{background:rgba(244,210,138,.24);border-radius:3px}
-.collect-item{display:flex;align-items:center;gap:10px;padding:9px;border-radius:11px;border:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.032);cursor:pointer;transition:all .18s}
+.collect-item{display:flex;align-items:center;gap:10px;width:100%;padding:9px;border-radius:11px;border:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.032);color:inherit;font:inherit;text-align:left;cursor:pointer;transition:all .18s}
 .collect-item:hover{background:rgba(244,210,138,.10);border-color:rgba(244,210,138,.24);transform:translateY(-1px)}
 .collect-item.busy{opacity:.58;pointer-events:none}
 .collect-item img,.collect-item .cover-placeholder{width:38px;height:38px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,.07);flex-shrink:0}

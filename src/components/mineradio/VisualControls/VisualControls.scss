@@ -1,5 +1,5 @@
 /* ============================================================ */
-/*  鎺у埗鍙?鈥?绠€鍖栫増                                              */
+/*  控制台 - 简化版                                              */
 /* ============================================================ */
 #fx-panel{position:fixed;z-index:18;right:-460px;bottom:92px;width:min(444px,calc(100vw - 48px));max-height:min(650px,calc(100vh - 132px));overflow:auto;overscroll-behavior:contain;background:var(--glass-bg);border:1px solid rgba(0,245,212,0.16);border-radius:20px;padding:18px 18px 20px;backdrop-filter:blur(44px) saturate(1.34);-webkit-backdrop-filter:blur(44px) saturate(1.34);box-shadow:var(--glass-shadow);opacity:0;transition:right .55s cubic-bezier(.16,1,.3,1),opacity .45s cubic-bezier(.16,1,.3,1),transform .55s cubic-bezier(.16,1,.3,1);pointer-events:none;transform:translateY(18px) scale(.97);scrollbar-width:thin;scrollbar-color:rgba(0,245,212,.22) transparent}
 #fx-panel.show, #fx-panel.peek{right:24px;opacity:1;pointer-events:auto;transform:translateY(0)}
@@ -54,7 +54,7 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,cal
 .fx-section-label::after{content:'';height:1px;flex:1;background:linear-gradient(90deg,rgba(0,245,212,.16),transparent)}
 .fx-section-label:first-of-type{margin-top:0}
 
-/* --- 棰勮鍗＄墖缃戞牸 --- */
+/* --- 预设卡片网格 --- */
 .preset-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
 .preset-card{position:relative;min-height:94px;border-radius:11px;border:1.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.025);cursor:pointer;overflow:hidden;transition:all .25s;display:flex;flex-direction:column;justify-content:flex-end;padding:10px}
 .preset-card:hover{border-color:rgba(255,255,255,.2);background:rgba(255,255,255,.05)}
@@ -66,7 +66,7 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,cal
 .preset-card .pc-desc{font-size:10px;color:rgba(255,255,255,.44);margin-top:4px;letter-spacing:.3px;line-height:1.35}
 .preset-card.active .pc-name{color:#fff}
 .preset-card[data-preset="6"] .pc-name,
-.preset-card[data-preset="6"] .pc-desc{font-family:"榛戜綋","SimHei","Microsoft YaHei","Noto Sans SC",Arial,sans-serif;font-weight:800;letter-spacing:.4px}
+.preset-card[data-preset="6"] .pc-desc{font-family:"黑体","SimHei","Microsoft YaHei","Noto Sans SC",Arial,sans-serif;font-weight:800;letter-spacing:.4px}
 .preset-card[data-preset="6"] .pc-name{font-size:14px}
 .preset-card[data-preset="6"] .pc-desc{font-size:10.5px;color:rgba(255,255,255,.52);font-weight:700}
 .preset-card[data-preset="6"] .pc-yui7w{color:#3257f7;font-family:"Microsoft Yi Baiti","SimHei","Microsoft YaHei",sans-serif;font-weight:900;font-style:italic;letter-spacing:.7px}
@@ -95,7 +95,7 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,cal
 .user-archive-actions button:hover{background:rgba(var(--fc-accent-rgb),.10);border-color:rgba(var(--fc-accent-rgb),.24);color:#fff}
 .user-archive-actions button:disabled{opacity:.34;cursor:default;background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.05);color:rgba(255,255,255,.42)}
 
-/* --- 涓绘粦鍧?--- */
+/* --- 主滑块 --- */
 .fx-slider{display:grid;grid-template-columns:minmax(78px,92px) minmax(0,1fr) 44px 28px;align-items:center;gap:10px;min-height:44px;margin:8px 0;padding:9px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.030)}
 .fx-slider label{font-size:11.5px;color:rgba(255,255,255,.72);letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fx-slider input[type=range]{width:100%;min-width:0;accent-color:var(--fc-accent)}
@@ -166,7 +166,7 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,cal
 .fx-color-row-label{font-size:11px;color:rgba(255,255,255,.66);line-height:1.2}
 .fx-color-row-label small{display:block;margin-top:2px;font-size:9.5px;color:rgba(255,255,255,.34);letter-spacing:.35px}
 
-/* --- 寮€鍏崇粍 --- */
+/* --- 开关组 --- */
 .fx-toggle-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
 .fx-toggle{min-height:39px;display:flex;align-items:center;justify-content:space-between;padding:9px 11px;border-radius:11px;border:1px solid rgba(255,255,255,.075);background:rgba(255,255,255,.028);cursor:pointer;transition:all .2s;font-size:11.5px;color:rgba(255,255,255,.72)}
 #t-float{display:none!important}
@@ -183,7 +183,7 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode{left:50%;width:min(1080px,cal
 .fx-slider.dev-locked{opacity:.48;filter:saturate(.72)}
 .fx-slider.dev-locked input{cursor:not-allowed}
 
-/* --- 涓夋€佸垎娈?--- */
+/* --- 三态分段 --- */
 .fx-seg{display:flex;border-radius:11px;border:1px solid rgba(255,255,255,.08);overflow:hidden;background:rgba(255,255,255,.026);margin-bottom:10px}
 .fx-seg button{flex:1;padding:8px 4px;background:none;border:none;color:rgba(255,255,255,.55);cursor:pointer;font-size:11.5px;font-family:inherit;transition:all .2s;letter-spacing:.4px;border-right:1px solid rgba(255,255,255,.05)}
 .fx-seg button:last-child{border-right:none}

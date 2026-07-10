@@ -1,5 +1,5 @@
 /* ============================================================ */
-/*  鑸炲彴姝岃瘝 (澶у瓧 + 3D 鍏ュ満 + 鍛煎惛)                              */
+/*  舞台歌词 (大字 + 3D 入场 + 呼吸)                              */
 /* ============================================================ */
 #stage-lyrics{display:none}
 .stage-lyric-line{position:absolute;font-family:var(--font-sans);font-weight:700;font-size:clamp(34px,5.6vw,76px);letter-spacing:2px;text-align:center;color:#fff;white-space:nowrap;max-width:92vw;padding:0 24px;text-shadow:0 0 14px rgba(168,246,255,.38),0 0 36px rgba(143,233,255,.30),0 0 80px rgba(115,167,255,.16);background:linear-gradient(180deg,rgba(246,253,255,1) 0%,rgba(168,246,255,1) 55%,rgba(126,205,255,1) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;opacity:0;transform-style:preserve-3d;will-change:transform,opacity,filter;filter:drop-shadow(0 4px 22px rgba(143,233,255,.30))}
@@ -10,7 +10,7 @@
 @keyframes lyr-out{0%{opacity:1;transform:translate3d(var(--bx,0px),0,0) rotateX(0) rotateY(0) scale(1);filter:blur(0)}100%{opacity:0;transform:translate3d(var(--outx,60px),var(--outy,-40px),-120px) rotateX(var(--outrx,-22deg)) rotateY(var(--outry,18deg)) scale(.78);filter:blur(10px)}}
 
 /* ============================================================ */
-/*  鎵嬪娍 HUD + 鎵嬮鏋?                                           */
+/*  手势 HUD + 手部骨架                                           */
 /* ============================================================ */
 .gesture-hud{position:fixed;left:50%;bottom:110px;z-index:21;width:min(440px,calc(100vw - 44px));padding:12px 16px;border-radius:16px;background:rgba(10,10,16,.42);border:1px solid rgba(255,255,255,.10);backdrop-filter:blur(28px) saturate(1.4);-webkit-backdrop-filter:blur(28px) saturate(1.4);font-size:12px;color:rgba(255,255,255,.80);opacity:0;transform:translate(-50%,8px);transition:all .2s;pointer-events:none;box-shadow:0 18px 60px rgba(0,0,0,.4)}
 .gesture-hud.show{opacity:1;transform:translate(-50%,0)}

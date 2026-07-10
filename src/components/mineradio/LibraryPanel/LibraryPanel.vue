@@ -24,10 +24,16 @@
   <div id="pl-pane" style="display:none">
     <div id="playlist-toolbar" class="queue-toolbar playlist-toolbar">
       <div id="playlist-sync-chip" class="queue-chip playlist-sync-chip">登录后同步各平台歌单</div>
-      <button id="playlist-refresh-btn" class="fx-mini-btn ghost playlist-refresh-btn" onclick="refreshUserPlaylists(true)" title="刷新歌单" aria-label="刷新歌单">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18.5 2.8v3h-3"/><path d="M5.5 21.2v-3h3"/></svg>
-        <span>刷新</span>
-      </button>
+      <div class="playlist-floating-tools">
+        <button id="playlist-refresh-btn" class="fx-mini-btn ghost playlist-refresh-btn" onclick="refreshUserPlaylists(true)" title="刷新歌单" aria-label="刷新歌单">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18.5 2.8v3h-3"/><path d="M5.5 21.2v-3h3"/></svg>
+          <span>刷新</span>
+        </button>
+        <button id="playlist-top-btn" class="fx-mini-btn ghost playlist-top-btn" onclick="scrollPlaylistPanelToTop()" title="返回顶部" aria-label="返回顶部">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>
+          <span>返回顶部</span>
+        </button>
+      </div>
     </div>
     <div id="pl-list" style="margin-top:6px"></div>
   </div>

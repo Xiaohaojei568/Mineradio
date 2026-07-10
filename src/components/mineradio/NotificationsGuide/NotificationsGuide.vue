@@ -15,7 +15,7 @@
     <div id="visual-guide-kicker" class="visual-guide-kicker">Guide</div>
     <div id="visual-guide-title" class="visual-guide-title"></div>
     <div id="visual-guide-body" class="visual-guide-body"></div>
-    <div id="visual-guide-hint" class="visual-guide-hint">点击空白处也可以继续</div>
+    <div id="visual-guide-hint" class="visual-guide-hint">页面可继续操作，也可以跳过引导</div>
     <div class="visual-guide-actions">
       <button type="button" onclick="closeVisualGuide(true)">跳过</button>
       <div id="visual-guide-progress" class="visual-guide-progress"></div>

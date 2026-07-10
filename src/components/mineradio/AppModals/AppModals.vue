@@ -82,8 +82,9 @@
       <button id="account-add-qq" class="modal-btn" onclick="openProviderLogin('qq')">补登 QQ 音乐</button>
       <button id="account-add-soda" class="modal-btn" onclick="openProviderLogin('soda')">补登汽水音乐</button>
     </div>
-    <div id="account-hint" class="account-hint">QQ 音乐真实登录暂未接入，当前先预览双平台账号交互。</div>
+    <div id="account-hint" class="account-hint">可在这里切换或补登音乐平台，首页、歌单和红心会按当前平台同步。</div>
     <div class="btn-row">
+      <button id="account-refresh-btn" class="modal-btn" onclick="refreshActiveAccountInfo()">刷新账号信息</button>
       <button class="modal-btn" onclick="closeUserModal()">关闭</button>
       <button id="account-logout-btn" class="modal-btn primary" onclick="logoutActiveAccount()">退出当前平台</button>
     </div>
@@ -232,7 +233,7 @@
           <span id="update-btn-fill" class="update-btn-fill"></span>
           <span id="update-btn-label" class="update-btn-label">立即更新</span>
         </button>
-        <button class="update-secondary-btn" type="button" onclick="closeUpdatePanel()">取消</button>
+        <button id="update-secondary-btn" class="update-secondary-btn" type="button" onclick="closeUpdatePanel()">暂不更新</button>
       </div>
       <div id="update-footnote" class="update-footnote">预览版只演示更新手感，不会真的下载安装。</div>
     </div>

@@ -34,16 +34,22 @@
           <div class="home-dashboard-note" aria-hidden="true">♪</div>
         </section>
 
-        <section class="home-dashboard-section home-lyric-board" aria-label="实时歌词">
-          <div class="home-lyric-head">
-            <span>LYRICS REAL-TIME</span>
-            <b id="home-dashboard-lyric-status">STANDBY</b>
+        <section class="home-dashboard-section home-listen-board" aria-label="听歌时长统计">
+          <div class="home-listen-head">
+            <span>听歌时长</span>
+            <b id="home-listen-stat-scope">多端聚合</b>
           </div>
-          <div id="home-dashboard-lyric" class="home-lyric-scroll" aria-live="polite">
-            <div class="home-lyric-stack">
-              <div class="home-lyric-line active">欢迎来到你的私人视觉电台</div>
-              <div class="home-lyric-line">播放歌曲后，这里会显示实时歌词。</div>
+          <div class="home-listen-main" aria-live="polite">
+            <div class="home-listen-copy">
+              <div id="home-listen-stat-value" class="home-listen-value">0 分钟</div>
+              <div id="home-listen-stat-sub" class="home-listen-sub">播放后开始累计</div>
             </div>
+            <div id="home-listen-stat-status" class="home-listen-status">待开播</div>
+          </div>
+          <div class="home-listen-metrics">
+            <div><span>播放</span><strong id="home-listen-stat-plays">0 次</strong></div>
+            <div><span>活跃</span><strong id="home-listen-stat-days">0 天</strong></div>
+            <div><span>常听</span><strong id="home-listen-stat-top">--</strong></div>
           </div>
         </section>
       </div>

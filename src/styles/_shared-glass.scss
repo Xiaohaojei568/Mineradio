@@ -85,7 +85,6 @@ html.control-glass-svg-ok #drop-overlay .drop-text {
 .queue-item,
 .mini-queue-item,
 .pl-detail-row,
-.pl-detail-play,
 .local-beat-tab,
 .search-history-chip,
 .search-result .add-btn,
@@ -117,7 +116,6 @@ html.control-glass-svg-ok .pl-card,
 html.control-glass-svg-ok .queue-item,
 html.control-glass-svg-ok .mini-queue-item,
 html.control-glass-svg-ok .pl-detail-row,
-html.control-glass-svg-ok .pl-detail-play,
 html.control-glass-svg-ok .local-beat-tab,
 html.control-glass-svg-ok .search-history-chip,
 html.control-glass-svg-ok .search-result .add-btn,
@@ -151,7 +149,6 @@ html.control-glass-svg-ok .mini-queue-remove {
 .mini-queue-item:hover,
 .mini-queue-item.now,
 .pl-detail-row:hover,
-.pl-detail-play:hover,
 .local-beat-tab:hover,
 .local-beat-tab.active,
 .search-history-chip:hover,
@@ -276,12 +273,6 @@ html.control-glass-svg-ok .mini-queue-remove {
 }
 #playlist-panel .pl-detail-head {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
-}
-#playlist-panel .pl-detail-play {
-  background: rgba(var(--fc-accent-rgb), 0.1) !important;
-  border: 1px solid rgba(var(--fc-accent-rgb), 0.32) !important;
-  box-shadow: none !important;
-  color: #fff !important;
 }
 #playlist-panel .pl-detail-row {
   background: rgba(255, 255, 255, 0.025) !important;
@@ -818,7 +809,6 @@ html.control-glass-svg-ok #search-results {
 .queue-item,
 .mini-queue-item,
 .pl-detail-row,
-.pl-detail-play,
 .local-beat-tab,
 .search-history-chip,
 .search-result .add-btn,
@@ -846,7 +836,6 @@ html.control-glass-svg-ok .pl-card,
 html.control-glass-svg-ok .queue-item,
 html.control-glass-svg-ok .mini-queue-item,
 html.control-glass-svg-ok .pl-detail-row,
-html.control-glass-svg-ok .pl-detail-play,
 html.control-glass-svg-ok .local-beat-tab,
 html.control-glass-svg-ok .search-history-chip,
 html.control-glass-svg-ok .search-result .add-btn,
@@ -1003,32 +992,89 @@ html.control-glass-svg-ok .mini-queue-remove {
   font-size: 13.5px !important;
   letter-spacing: 0 !important;
 }
-#playlist-panel .pl-detail-actions {
-  margin: 0 !important;
-  padding: 2px 0 7px !important;
-}
-#playlist-panel .pl-detail-play {
-  height: 32px !important;
-  min-width: 104px !important;
-}
-#playlist-panel .pl-detail-actions .pl-detail-count {
-  margin-left: auto !important;
-  height: 30px !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  padding: 0 8px !important;
-  border-radius: 999px !important;
-  background: rgba(255, 255, 255, 0.045) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  color: rgba(255, 255, 255, 0.46) !important;
-  font-size: 10.5px !important;
-}
 #playlist-panel .pl-detail-list {
   gap: 7px !important;
+}
+#playlist-panel {
+  overflow: auto !important;
+  overscroll-behavior: contain;
+}
+.mineradio-virtual-list {
+  display: block !important;
+  width: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  contain: layout paint style;
+  position: relative;
+  scrollbar-width: thin;
+}
+.mineradio-virtual-list.mineradio-virtual-list-external {
+  overflow: visible !important;
+  contain: layout style;
+}
+.mineradio-virtual-list .virtual-spacer {
+  min-height: 0;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+.mineradio-virtual-list .virtual-row {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
+}
+.mineradio-virtual-list .virtual-row > * {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0 !important;
+}
+.home-list-body.mineradio-virtual-list {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 220px;
+  max-height: min(520px, calc(100vh - 240px));
+  overflow: auto !important;
+}
+#queue-list.mineradio-virtual-list,
+#pl-list.mineradio-virtual-list,
+#podcast-list.mineradio-virtual-list {
+  max-height: min(560px, calc(100vh - 250px));
+  min-height: 180px;
+  overflow: auto !important;
+  padding-right: 3px;
+  overscroll-behavior: contain;
+}
+#queue-list.mineradio-virtual-list.mineradio-virtual-list-external,
+#pl-list.mineradio-virtual-list.mineradio-virtual-list-external,
+#podcast-list.mineradio-virtual-list.mineradio-virtual-list-external {
+  max-height: none;
+  min-height: 0;
+  overflow: visible !important;
+  padding-right: 0;
+  overscroll-behavior: auto;
+}
+#podcast-list.mineradio-virtual-list {
+  min-height: 150px;
+}
+#playlist-panel .pl-detail-virtual-list {
+  max-height: none;
+  overflow: visible !important;
+  padding-right: 2px;
+}
+.artist-song-virtual-list.mineradio-virtual-list {
+  min-height: 240px;
+  max-height: min(420px, 52vh);
+  overflow: auto !important;
+  padding-right: 2px;
+}
+.home-list-row {
+  width: 100%;
+  box-sizing: border-box;
 }
 #playlist-panel .pl-detail-row {
   min-height: 48px !important;
   padding: 7px 8px !important;
+  margin: 0 6px 0 0 !important;
   border-radius: 12px !important;
   background: rgba(0, 0, 0, 0.58) !important;
 }
@@ -1039,18 +1085,6 @@ html.control-glass-svg-ok .mini-queue-remove {
 }
 #playlist-panel .pl-detail-row-title {
   font-size: 12px !important;
-}
-#playlist-panel .pl-panel-top-fab {
-  margin-left: 0 !important;
-  background: rgba(0, 0, 0, 0.72) !important;
-  border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  box-shadow:
-    0 10px 24px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
-}
-#playlist-panel .pl-panel-top-fab:hover {
-  background: rgba(var(--fc-accent-rgb), 0.12) !important;
-  border-color: rgba(var(--fc-accent-rgb), 0.32) !important;
 }
 html.control-glass-svg-ok .icon-btn,
 html.control-glass-svg-ok .fx-mini-btn,
@@ -1067,7 +1101,6 @@ html.control-glass-svg-ok .pl-card,
 html.control-glass-svg-ok .queue-item,
 html.control-glass-svg-ok .mini-queue-item,
 html.control-glass-svg-ok .pl-detail-row,
-html.control-glass-svg-ok .pl-detail-play,
 html.control-glass-svg-ok .local-beat-tab,
 html.control-glass-svg-ok .search-history-chip,
 html.control-glass-svg-ok .search-result .add-btn,
@@ -1240,23 +1273,23 @@ html:fullscreen
 }
 body.desktop-shell.desktop-fullscreen
   .home-hero.home-dashboard-shell
-  .home-lyric-board,
+  .home-listen-board,
 html:fullscreen
   body.desktop-shell
   .home-hero.home-dashboard-shell
-  .home-lyric-board {
+  .home-listen-board {
   justify-content: flex-start !important;
   padding: 28px 22px 18px !important;
 }
 body.desktop-shell.desktop-fullscreen
   .home-hero.home-dashboard-shell
-  .home-lyric-scroll,
+  .home-listen-main,
 html:fullscreen
   body.desktop-shell
   .home-hero.home-dashboard-shell
-  .home-lyric-scroll {
+  .home-listen-main {
   height: auto !important;
-  min-height: 118px !important;
+  min-height: 88px !important;
   margin-top: 12px !important;
   flex: 1 1 auto !important;
 }

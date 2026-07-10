@@ -1,4 +1,4 @@
-/* ---------- 鍚姩椤?---------- */
+/* ---------- 启动页 ---------- */
 #splash{position:fixed;inset:0;z-index:300;background:#010304;display:flex;align-items:center;justify-content:center;pointer-events:auto;opacity:1;overflow:hidden;transition:opacity 1180ms cubic-bezier(.16,1,.3,1),transform 1180ms cubic-bezier(.16,1,.3,1);box-shadow:inset 0 0 180px rgba(0,0,0,.88)}
 #splash::before{content:'';position:absolute;inset:-8%;z-index:0;background:linear-gradient(115deg,transparent 0%,rgba(255,83,103,.055) 24%,transparent 42%,rgba(244,210,138,.052) 62%,transparent 82%),repeating-linear-gradient(90deg,rgba(255,255,255,.030) 0 1px,transparent 1px 54px),repeating-linear-gradient(0deg,rgba(255,255,255,.020) 0 1px,transparent 1px 46px),linear-gradient(180deg,#020606 0%,#050607 42%,#000 100%);filter:blur(.4px);opacity:.90;animation:splash-field-breathe 7s ease-in-out infinite alternate;pointer-events:none}
 #splash::after{content:'';position:absolute;inset:0;z-index:2;background:linear-gradient(90deg,rgba(0,0,0,.82),transparent 21%,transparent 79%,rgba(0,0,0,.82)),linear-gradient(180deg,rgba(0,0,0,.68),transparent 32%,transparent 64%,rgba(0,0,0,.74));pointer-events:none}
@@ -21,7 +21,9 @@
 .splash-signal-line::after{content:'';position:absolute;left:50%;top:50%;width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.82);box-shadow:0 0 24px rgba(244,210,138,.54);transform:translate(-50%,-50%) scale(.32);opacity:0;animation:splash-signal-blip 4200ms cubic-bezier(.22,1,.36,1) forwards}
 .splash-sub{font-size:10px;font-weight:600;letter-spacing:.22em;color:rgba(255,255,255,.34);text-transform:uppercase;opacity:0;animation:splash-sub-in 4200ms cubic-bezier(.22,1,.36,1) forwards}
 .splash-enter{margin-top:8px;font-size:11px;font-weight:700;letter-spacing:.24em;color:rgba(255,255,255,.62);text-transform:uppercase;opacity:0;transform:translateY(10px);text-shadow:0 0 18px rgba(244,210,138,.24),0 0 34px rgba(122,215,194,.12);transition:opacity 620ms cubic-bezier(.22,1,.36,1),transform 620ms cubic-bezier(.22,1,.36,1)}
-#splash.ready .splash-enter{opacity:1;transform:translateY(0);animation:splash-enter-pulse 1800ms ease-in-out infinite alternate}
+#splash.ready .splash-enter,#splash.loading .splash-enter{opacity:1;transform:translateY(0)}
+#splash.ready .splash-enter{animation:splash-enter-pulse 1800ms ease-in-out infinite alternate}
+#splash.loading .splash-enter{animation:none;color:rgba(255,255,255,.48);letter-spacing:.12em;text-shadow:0 0 18px rgba(244,210,138,.14),0 0 34px rgba(122,215,194,.08)}
 @keyframes splash-field-breathe{0%{opacity:.72;transform:scale(1)}100%{opacity:1;transform:scale(1.035)}}
 @keyframes splash-mine-in{0%{opacity:0;clip-path:inset(48% 0 49% 0);transform:translate(calc(-50% - 10px),-42%) skewX(-10deg) scaleX(1.08);letter-spacing:.055em}14%{opacity:.92;clip-path:inset(40% 0 42% 0);transform:translate(calc(-50% - 4px),-50%) skewX(-4deg) scaleX(1.04);letter-spacing:.014em}26%{opacity:1;clip-path:inset(0);transform:translate(-50%,-50%) skewX(0) scaleX(1);letter-spacing:-.040em}48%{opacity:1;transform:translate(-50%,-50%) scale(1)}67%{opacity:1;transform:translate(calc(-50% - clamp(66px,10.8vw,130px)),-50%) scale(.998);letter-spacing:-.055em}100%{opacity:1;transform:translate(calc(-50% - clamp(66px,10.8vw,130px)),-50%) scale(.998)}}
 @keyframes splash-radio-in{0%,32%{opacity:0;clip-path:inset(52% 0 44% 0);transform:translate(calc(-50% + clamp(78px,12vw,142px)),-50%) skewX(9deg) scaleX(1.06);background-position:0 0}48%{opacity:.88;clip-path:inset(34% 0 32% 0);transform:translate(calc(-50% + clamp(72px,11.5vw,138px)),-50%) skewX(3deg) scaleX(1.02);background-position:52% 0}66%{opacity:1;clip-path:inset(0);transform:translate(calc(-50% + clamp(70px,11.4vw,136px)),-50%) scale(1);background-position:76% 0}100%{opacity:1;transform:translate(calc(-50% + clamp(70px,11.4vw,136px)),-50%) scale(1);background-position:100% 0}}
@@ -31,7 +33,7 @@
 @keyframes splash-sub-in{0%,38%{opacity:0;transform:translateY(7px)}56%{opacity:.58;transform:translateY(0)}100%{opacity:.42;transform:translateY(0)}}
 @keyframes splash-enter-pulse{0%{opacity:.46;text-shadow:0 0 14px rgba(244,210,138,.16),0 0 26px rgba(122,215,194,.08)}100%{opacity:.78;text-shadow:0 0 22px rgba(244,210,138,.30),0 0 42px rgba(122,215,194,.16)}}
 
-/* ---------- 涓绘彁绀?---------- */
+/* ---------- 主提示 ---------- */
 #hint{display:none;position:fixed;z-index:3;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:rgba(255,255,255,0.18);font-size:13px;font-weight:300;letter-spacing:3px;text-transform:uppercase;pointer-events:none;transition:opacity 1s ease}
 #hint.hidden{opacity:0}
 #hint.shelf-hidden{opacity:0!important}
@@ -41,7 +43,7 @@ body.splash-active:not(.splash-revealing) #hint{transform:translate(-50%,-44%) s
 body.splash-active.splash-revealing #hint:not(.hidden){opacity:1;transform:translate(-50%,-50%) scale(1);filter:blur(0);transition:opacity 1300ms 260ms cubic-bezier(.32,0,.1,1),transform 1300ms 260ms cubic-bezier(.32,0,.1,1),filter 1300ms 260ms cubic-bezier(.32,0,.1,1)}
 body.splash-active.splash-revealing #top-right{opacity:1;transition:opacity 1100ms 520ms cubic-bezier(.32,0,.1,1)}
 
-/* ---------- 椤堕儴鎼滅储 (鍗婇殣钘? ---------- */
+/* ---------- 顶部搜索 (半隐藏) ---------- */
 #search-area{--search-offset:0px;position:fixed;z-index:10;top:-76px;left:50%;transform:translateX(calc(-50% + var(--search-offset)));width:auto;display:flex;align-items:flex-start;gap:12px;transition:top .45s cubic-bezier(.2,.7,.2,1),opacity .35s,transform .35s cubic-bezier(.2,.7,.2,1);opacity:0;pointer-events:none}
 #search-area.has-cover-action{--search-offset:0px}
 #search-area.peek{top:24px;opacity:1;pointer-events:auto}

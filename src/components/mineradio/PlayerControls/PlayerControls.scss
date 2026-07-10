@@ -1,4 +1,4 @@
-/* ---------- 搴曢儴鎺т欢 ---------- */
+/* ---------- 底部控件 ---------- */
 .control-glass-filter-svg{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}
 #bottom-handle{position:fixed;z-index:8;left:50%;bottom:13px;width:172px;height:10px;border:0;border-radius:999px;background:transparent;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;transform:translateX(-50%) translateY(0) scale(.96);opacity:.14;cursor:pointer;transition:opacity .42s cubic-bezier(.16,1,.3,1),transform .42s cubic-bezier(.16,1,.3,1);display:flex;align-items:center;justify-content:center;padding:0}
 #bottom-handle::before{content:'';position:absolute;inset:-3px -4px;border-radius:999px;background:transparent}
@@ -122,7 +122,7 @@ body.diy-mode #bottom-bar.stage-mode{width:min(1160px,calc(100vw - 148px));botto
 @media (max-width: 1180px){body.diy-mode #bottom-bar,body.diy-mode #bottom-bar.stage-mode{width:calc(100vw - 142px);padding:9px 14px 12px;left:calc(50% - 34px)}body.diy-mode #controls{grid-template-columns:minmax(240px,1fr) minmax(214px,auto) minmax(260px,auto);gap:8px}.control-cluster{gap:8px}.control-cover{width:44px;height:44px}.control-meta{max-width:138px}.ctrl-btn{width:32px;height:32px}.ctrl-btn svg{width:19px;height:19px}body.diy-mode #play-btn{width:54px;height:54px}body.diy-mode #time-display{min-width:72px;font-size:11px}}
 @media (max-width: 920px){#bottom-bar,#bottom-bar.stage-mode{width:calc(100vw - 28px);padding:9px 14px 12px}#controls{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:8px}.control-cluster{gap:8px;height:56px}.control-cover{width:44px;height:44px}.control-meta{max-width:170px}.control-title{font-size:12.5px}.control-artist{font-size:11px}.ctrl-btn{width:32px;height:32px}.ctrl-btn svg{width:19px;height:19px}.volume-popover,.quality-popover,.speed-popover{bottom:42px}#play-btn{width:54px;height:54px}#time-display{display:none}}
 @media (max-width: 620px){#bottom-bar,#bottom-bar.stage-mode{width:calc(100vw - 20px)}#controls{grid-template-columns:1fr}.control-cluster{grid-column:1!important;justify-content:center}.control-cluster.transport{order:1}.control-cluster.actions{order:2}.control-cluster.modes{order:3}.control-track{display:none}.heart-svg{width:19px;height:19px}}
-/* ---------- 鎺у埗鏍忚嚜閫傚簲瀹為獙锛氫腑杞村浐瀹?+ 宸﹀彸绛夊寮规€?---------- */
+/* ---------- 控制栏自适应实验：中轴固定 + 左右等宽弹性 ---------- */
 #bottom-bar,
 #bottom-bar.stage-mode,
 body.simple-mode #bottom-bar{

@@ -1,4 +1,4 @@
-/* ---------- 宸︿笅灏忓皝闈?---------- */
+/* ---------- 左下小封面 ---------- */
 #thumb-wrap{position:fixed;z-index:6;left:24px;bottom:24px;display:none;align-items:center;gap:14px;opacity:0;pointer-events:none;transition:opacity .8s ease}
 #thumb-wrap.visible{opacity:1;pointer-events:auto}
 #thumb-cover{width:64px;height:64px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,0.05);box-shadow:0 8px 32px rgba(0,0,0,0.4);transition:transform .15s ease}
